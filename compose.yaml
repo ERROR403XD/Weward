@@ -41,6 +41,8 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       COLLECTOR_CONTROL_URL: http://collector:8081
+      DESKTOP_PUBLIC_PORT: ${DESKTOP_PORT:-6080}
+      DESKTOP_PUBLIC_URL: ${DESKTOP_PUBLIC_URL:-}
     volumes:
       - ${RECEIVER_DATA_DIR:-./data/receiver}:/data
     ports:

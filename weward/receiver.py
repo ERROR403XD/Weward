@@ -213,6 +213,21 @@ class Receiver:
 
 
 class ReceiverHandler(Handler):
+    def desktop_url(self):
+        configured = os.environ.get("DESKTOP_PUBLIC_URL", "").strip()
+        if configured:
+            parsed = urllib.parse.urlsplit(configured)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or any(ord(char) < 32 for char in configured):
+                raise ValueError("DESKTOP_PUBLIC_URL 必须是完整的 HTTP(S) 桌面地址")
+            return configured
+        host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname
+        port = int(os.environ.get("DESKTOP_PUBLIC_PORT", "6080"))
+        if not host or not 1 <= port <= 65535:
+            raise ValueError("无法确定桌面地址，请检查 DESKTOP_PUBLIC_PORT 或设置 DESKTOP_PUBLIC_URL")
+        if ":" in host:
+            host = "[" + host + "]"
+        return f"http://{host}:{port}/vnc.html?autoconnect=1&resize=scale&reconnect=0"
+
     def do_GET(self):
         try:
             self.get()
@@ -227,6 +242,13 @@ class ReceiverHandler(Handler):
         app = self.server.app
         if parsed.path == "/":
             self.static("receiver.html")
+        elif parsed.path == "/desktop":
+            target = self.desktop_url()
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
         elif parsed.path == "/style.css":
             self.static("style.css")
         elif parsed.path == "/receiver.js":
