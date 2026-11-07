@@ -1,0 +1,20 @@
+services:
+  collector:
+    environment:
+      WEWARD_MEDIA_ACCOUNT: ${WECHAT_ACCOUNT_DIR:?请设置 xwechat_files 内的账号目录名 WECHAT_ACCOUNT_DIR}
+    volumes:
+      - type: bind
+        source: ${WECHAT_MEDIA_DIR:?请设置已挂载的媒体目录 WECHAT_MEDIA_DIR}/msg
+        target: /webox/state/home/xwechat_files/${WECHAT_ACCOUNT_DIR}/msg
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WECHAT_MEDIA_DIR}/resource
+        target: /webox/state/home/xwechat_files/${WECHAT_ACCOUNT_DIR}/resource
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WECHAT_MEDIA_DIR}/shared
+        target: /webox/state/shared
+        bind:
+          create_host_path: false

@@ -1,0 +1,57 @@
+name: weward
+
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+      args:
+        WEBOX_IMAGE: ${WEBOX_IMAGE:-weward-webox:8ca042c-wx4.1.1.8-compat2}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      WATCH_ROOM_REMARK: ${WATCH_ROOM_REMARK:-webox.weward}
+      FORWARD_URL: ${FORWARD_URL:-http://receiver:8080/api/messages}
+      INITIAL_LOOKBACK_SECONDS: ${INITIAL_LOOKBACK_SECONDS:-300}
+      DESKTOP_PUBLIC_PORT: ${DESKTOP_PORT:-6080}
+      RECEIVER_PUBLIC_PORT: ${RECEIVER_PORT:-18081}
+    volumes:
+      - ${WEBOX_STATE_DIR:-./data/webox}:/webox/state
+      - ${COLLECTOR_DATA_DIR:-./data/collector}:/data
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${COLLECTOR_PORT:-18080}:8081"
+      - "${BIND_HOST:-127.0.0.1}:${DESKTOP_PORT:-6080}:6080"
+    shm_size: 1gb
+    cap_add:
+      - SYS_PTRACE
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz'); urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: 20m, max-file: "3"}
+
+  receiver:
+    build:
+      context: .
+      dockerfile: docker/receiver.Dockerfile
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      COLLECTOR_CONTROL_URL: http://collector:8081
+    volumes:
+      - ${RECEIVER_DATA_DIR:-./data/receiver}:/data
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${RECEIVER_PORT:-18081}:8080"
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: {max-size: 20m, max-file: "3"}

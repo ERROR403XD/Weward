@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Weward</title><link rel="stylesheet" href="/receiver.css"><script src="/receiver.js" defer></script></head>
+<body>
+<header class="app-header"><a href="/" class="brand">Weward<span>群聊中转</span></a><nav aria-label="主导航"><button data-tab="messages" class="active" aria-pressed="true">消息</button><button data-tab="jobs" aria-pressed="false">投递任务</button><button data-tab="settings" aria-pressed="false">配置</button></nav><span id="connection" class="connection">连接中</span></header>
+<main>
+<section id="messages-panel" class="workspace">
+  <aside class="rooms-sidebar"><div class="sidebar-title">群聊 <span id="room-count"></span></div><input id="room-search" type="search" placeholder="查找群聊" aria-label="查找群聊"><div id="room-list" class="room-list"></div></aside>
+  <div class="conversation">
+    <header class="conversation-header"><div class="conversation-heading"><h1 id="room-title">选择群聊</h1><span id="room-summary" class="muted"></span></div><div class="paging"><button id="older" class="quiet">更早</button><button id="newer" class="quiet">较新</button><button id="latest" class="quiet">最新</button></div></header>
+    <form id="message-filters" class="message-filters"><input id="message-query" type="search" placeholder="搜索当前群" aria-label="搜索当前群"><select id="message-type" aria-label="消息类型"><option value="">全部类型</option><option value="text">文字</option><option value="image">图片</option><option value="link">链接</option><option value="reply">引用</option></select><select id="message-archived" aria-label="整理状态"><option value="0">未收起</option><option value="all">全部</option><option value="1">已收起</option></select><button type="submit" class="quiet">筛选</button></form>
+    <p id="messages-error" class="inline-error hidden" role="alert"></p><div id="message-list" class="message-list"><div class="empty">暂无群聊消息</div></div>
+  </div>
+</section>
+<section id="jobs-panel" class="page hidden">
+  <header class="page-header"><h1>投递任务</h1><button id="new-job" class="primary">新建任务</button></header>
+  <div class="section-bar"><div class="subtabs" aria-label="投递视图"><button data-job-view="active" class="active" aria-pressed="true">任务 <span id="job-count"></span></button><button data-job-view="history" aria-pressed="false">投递历史</button></div><select id="history-job" class="hidden" aria-label="筛选投递历史任务"><option value="">全部任务</option></select></div>
+  <p id="jobs-error" class="inline-error hidden" role="alert"></p>
+  <div id="active-jobs" class="table-scroll"><table><thead><tr><th>任务</th><th>群聊</th><th>计划</th><th>待发送 / 已发送</th><th>状态</th><th class="actions-column">操作</th></tr></thead><tbody id="job-list"></tbody></table><div id="jobs-empty" class="empty hidden">暂无投递任务</div></div>
+  <div id="job-history" class="hidden"><div class="table-scroll"><table><thead><tr><th>时间</th><th>任务</th><th>消息</th><th>结果</th><th>尝试</th><th class="actions-column">操作</th></tr></thead><tbody id="history-list"></tbody></table><div id="history-empty" class="empty hidden">暂无投递记录</div></div><div class="history-paging"><button id="history-latest" class="quiet">最新</button><button id="history-older" class="quiet">更早记录</button></div></div>
+</section>
+<section id="settings-panel" class="page hidden">
+  <header class="page-header"><h1>监视群聊</h1><span id="collector-state" class="muted"></span></header>
+  <form id="group-search-form" class="group-search"><input id="group-query" type="search" placeholder="输入群名，添加监视" aria-label="搜索群名" required><button type="submit" class="primary">查找群聊</button></form>
+  <p id="settings-error" class="inline-error hidden" role="alert"></p><div id="group-results" class="search-results hidden"></div>
+  <div class="table-scroll"><table><thead><tr><th>群聊</th><th>状态</th><th class="actions-column">操作</th></tr></thead><tbody id="monitored-list"></tbody></table><div id="monitored-empty" class="empty hidden">暂无监视群聊</div></div>
+  <section class="notification-settings"><header class="page-header"><h2>POST 事件通知</h2><span id="notification-saved" class="muted"></span></header>
+    <p class="muted">由接收端检测采集状态并独立发送通知。离线可能是微信掉线、采集异常或容器不可达；持续异常才通知，恢复后通知上线。</p>
+    <form id="notification-form"><div class="form-grid">
+      <label class="check-field"><input id="notification-enabled" type="checkbox">启用通知</label>
+      <label>通知地址<input id="notification-url" type="url" placeholder="https://…"></label>
+      <label>请求头（JSON）<textarea id="notification-headers" rows="3" spellcheck="false">{}</textarea></label>
+      <label>请求体模板（JSON）<textarea id="notification-body" rows="3" spellcheck="false">{"text":"{{message}}"}</textarea></label>
+      <label>成功响应字段（可选）<input id="notification-response-field" placeholder="例如 code 或 data.ok"><small>留空时以 HTTP 2xx 为成功；填写后还会校验 JSON 字段。</small></label>
+      <label>预期响应值（JSON）<input id="notification-response-value" value="true" placeholder="true、0 或字符串"></label>
+    </div><p id="notification-placeholders" class="muted"></p><div id="notification-events" class="notification-events"></div>
+    <p class="muted">通知模板仅替换字符串值，支持换行和引号。执行投递按每次实际发送文件包触发，含重试；空任务无此通知。通知失败最多重试 8 次，不影响消息投递。关闭通知会取消待发通知；已发出的请求无法撤回。</p>
+    <p id="notification-error" class="inline-error hidden" role="alert"></p><button id="save-notifications" type="submit" class="primary">保存通知配置</button></form>
+    <h3>最近通知</h3><div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>状态</th><th>尝试</th><th>错误</th></tr></thead><tbody id="notification-history"></tbody></table></div>
+  </section>
+</section>
+</main>
+<div id="toast" class="toast hidden" role="status"></div>
+<dialog id="job-dialog"><form id="job-form"><header class="dialog-header"><h2 id="job-form-title">新建任务</h2><button type="button" class="icon-button" data-close="job-dialog" aria-label="关闭">×</button></header><div class="form-grid">
+  <label>名称<input id="job-name" required maxlength="200"></label><label>接收地址<input id="job-url" type="url" required placeholder="https://…"></label>
+  <label>执行计划<input id="job-cron" required value="0 9 * * *" aria-describedby="cron-hint"><small id="cron-hint">每天 9 点：0 9 * * *</small></label><label>时区<input id="job-timezone" required value="Asia/Shanghai"></label>
+  <label id="job-start-field">首次范围<select id="job-start" aria-describedby="job-start-hint"><option value="all">包含已有消息</option><option value="now">仅创建后收到的消息</option></select><small id="job-start-hint">包含已有消息：从接收端已保存的历史开始。仅新消息：跳过创建任务前已入库的消息，按入库时间判断。之后每次只投递本任务尚未成功发送的消息；不会补抓微信历史。</small></label><label class="check-field"><input id="job-enabled" type="checkbox">启用任务</label>
+  </div><fieldset><legend>群聊</legend><label class="check-field"><input id="job-all-rooms" type="checkbox" checked>全部群聊</label><div id="job-rooms" class="room-choices hidden"></div></fieldset>
+  <p id="job-form-error" class="inline-error hidden" role="alert"></p><footer class="dialog-footer"><button type="button" data-close="job-dialog">取消</button><button type="submit" id="save-job" class="primary">保存</button></footer>
+</form></dialog>
+<dialog id="detail-dialog"><header class="dialog-header"><h2 id="detail-title">详情</h2><button class="icon-button" data-close="detail-dialog" aria-label="关闭">×</button></header><div id="detail-content"></div></dialog>
+</body></html>

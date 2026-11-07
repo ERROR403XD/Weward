@@ -1,0 +1,64 @@
+diff --git a/internal/wechatdb/image.go b/internal/wechatdb/image.go
+--- a/internal/wechatdb/image.go
++++ b/internal/wechatdb/image.go
+@@ -201,4 +201,6 @@
+ func imageKey(accountDir, attachRoot string) (imageKeyMaterial, error) {
++	wewardImageKeyMu.Lock()
++	defer wewardImageKeyMu.Unlock()
+ 	if value, found := imageKeys.Load(accountDir); found {
+ 		return value.(imageKeyMaterial), nil
+ 	}
+@@ -208,7 +210,12 @@
+ 	if err != nil {
+ 		return imageKeyMaterial{}, err
+ 	}
++	if key, valid := cachedImageKey(accountDir, files); valid {
++		imageKeys.Store(accountDir, key)
++		return key, nil
++	}
+ 	key, err := deriveImageKey(accountDir, files)
+ 	if err == nil {
+ 		imageKeys.Store(accountDir, key)
++		saveImageKey(accountDir, key)
+ 	}
+@@ -246,5 +253,5 @@
+ 	xorKey, err := imageXORKey(files)
+ 	if err != nil {
+-		return imageKeyMaterial{}, err
++		return recoverImageKey(accountDir, files)
+ 	}
+ 	templates, err := imageTemplateBlocks(files, 3)
+@@ -268,2 +275,2 @@
+-	return imageKeyMaterial{}, errors.New("could not derive the local WeChat image key")
++	return recoverImageKey(accountDir, files)
+ }
+diff --git a/internal/wechatapi/server.go b/internal/wechatapi/server.go
+--- a/internal/wechatapi/server.go
++++ b/internal/wechatapi/server.go
+@@ -232,4 +232,9 @@
+ 		}
+ 		if err != nil {
++			if message.MsgType == wecom.MessageTypeImage && !errors.Is(err, errInboundMediaNotReady) {
++				message.Image.Error = err.Error()
++				server.logger.Warn("could not decode inbound image", "msgid", message.MsgID, "error", err)
++				err = errInboundMediaNotReady
++			}
+ 			if !errors.Is(err, errInboundMediaNotReady) {
+ 				return ready, false, fmt.Errorf("materialize WeChat message %s: %w", message.MsgID, err)
+diff --git a/wecom/types.go b/wecom/types.go
+--- a/wecom/types.go
++++ b/wecom/types.go
+@@ -24,5 +24,6 @@
+ type Image struct {
+ 	SDKFileID string `json:"sdkfileid"`
++	Error     string `json:"error,omitempty"`
+ 	MD5Sum    string `json:"md5sum"`
+ 	FileSize  int64  `json:"filesize"`
+ }
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,2 +14,3 @@
+     mkdir -p /out && \
++    CGO_ENABLED=1 go test ./internal/wechatdb ./internal/wechatapi && \
+     CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -extldflags=-s" -o /out/weagent ./cmd/weagent

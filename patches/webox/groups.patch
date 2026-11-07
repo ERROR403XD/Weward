@@ -1,0 +1,32 @@
+diff --git a/internal/wechatapi/server.go b/internal/wechatapi/server.go
+--- a/internal/wechatapi/server.go
++++ b/internal/wechatapi/server.go
+@@ -67,3 +67,4 @@
+ type getUpdatesRequest struct {
+ 	Cursor string `json:"cursor"`
++	RoomIDs []string `json:"room_ids"`
+ }
+@@ -100,1 +101,2 @@
+ 	mux.HandleFunc("GET /ilink/bot/contacts", server.getContacts)
++	mux.HandleFunc("GET /ilink/bot/groups", server.getGroups)
+@@ -115,1 +117,5 @@
+ 	if _, err := parseCursor(body.Cursor, server.now()); err != nil {
++		writeError(response, http.StatusBadRequest, err.Error())
++		return
++	}
++	if !validRoomIDs(body.RoomIDs) {
+@@ -116,1 +122,1 @@
+-		writeError(response, http.StatusBadRequest, err.Error())
++		writeError(response, http.StatusBadRequest, "room_ids must contain group identifiers")
+@@ -127,1 +133,1 @@
+-		messages, cursor, err := server.updatedMessages(request.Context(), body.Cursor)
++		messages, cursor, err := server.updatedMessagesForRooms(request.Context(), body.Cursor, body.RoomIDs)
+@@ -151,1 +157,5 @@
+ func (server *Server) updatedMessages(ctx context.Context, rawCursor string) ([]wecom.Message, string, error) {
++	return server.updatedMessagesForRooms(ctx, rawCursor, nil)
++}
++
++func (server *Server) updatedMessagesForRooms(ctx context.Context, rawCursor string, selectedRooms []string) ([]wecom.Message, string, error) {
+@@ -157,1 +167,1 @@
+-	sessions, err := server.rooms.RoomSessions(cursor / 1000)
++	sessions, err := server.sessionsForRooms(selectedRooms, cursor / 1000)

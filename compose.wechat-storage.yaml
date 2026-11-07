@@ -1,0 +1,8 @@
+services:
+  collector:
+    volumes:
+      - type: bind
+        source: ${WECHAT_FILES_DIR:?请设置已存在的微信数据目录 WECHAT_FILES_DIR}
+        target: /webox/state/home/xwechat_files
+        bind:
+          create_host_path: false

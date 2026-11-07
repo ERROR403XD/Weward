@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Weward · 采集转发</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+<header><div><span class="eyebrow">WEWARD / COLLECTOR</span><h1>微信群消息采集</h1><p class="muted">监听指定群的所有成员消息，持久化后通过 HTTP 转发。</p></div><div class="row"><a class="button" id="desktop" target="_blank" rel="noopener">微信桌面 / 扫码</a><a class="button" id="receiver" target="_blank" rel="noopener">接收展示端 ↗</a></div></header>
+<div id="connection" class="error hidden"></div>
+<div class="grid"><div class="card metric"><small>已采集</small><strong id="total">—</strong></div><div class="card metric"><small>等待转发</small><strong id="pending">—</strong></div><div class="card metric"><small>HTTP 已送达</small><strong id="delivered">—</strong></div></div>
+<section class="card"><div class="row between"><h2>采集状态</h2><span id="phase" class="badge">正在连接</span></div><p id="state">等待采集进程</p><div id="error" class="warning hidden"></div><p class="muted" id="identity"></p><p class="muted" id="last-poll"></p></section>
+<section class="card"><h2>转发设置</h2><p class="muted">群监听在中转器「配置」中管理。下方备注仅在首次设置监听列表前生效。</p>
+<form id="config"><label for="remark">兼容监听备注</label><input id="remark" required value="webox.weward"><label for="target">HTTP POST 目标地址</label><input id="target" type="url" required value="http://receiver:8080/api/messages"><div class="row"><button class="primary" type="submit">保存设置</button><span id="saved" role="status"></span></div></form>
+<p class="muted" style="margin-top:16px">约 45 秒内生效，已入队消息仍发往原地址。</p></section>
+<section class="card"><div class="row between"><h2>最近转发记录</h2><button id="retry">立即重试待发送消息</button></div><div id="deliveries" class="muted">暂无记录</div><p class="muted">失败自动退避重试，最大间隔约 5 分钟；记录及图片快照保存在采集端。接收页面以实际 POST 入站记录为准。</p></section>
+</main><script>
+const element = id => document.getElementById(id);
+let initialized = false;
+const time = value => value ? new Date(value).toLocaleString() : '尚无';
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+async function refresh() {
+  try {
+    const status = await api('/api/status');
+    element('connection').classList.add('hidden');
+    for (const key of ['total', 'pending', 'delivered']) element(key).textContent = status.queue[key];
+    element('phase').textContent = status.phase === 'idle' ? '空闲' : status.ready ? '正在监听' : '等待就绪';
+    element('state').textContent = status.phase === 'idle' ? '暂无启用的监听群。' : status.ready ? '采集已就绪。' : '请检查登录状态和群监听配置。';
+    element('error').textContent = status.last_error || '';
+    element('error').classList.toggle('hidden', !status.last_error);
+    const rooms = status.rooms || (status.room ? [status.room] : []);
+    element('identity').textContent = `账号：${status.account?.nickname || status.account?.account_id || '未登录'} ｜ 监听 ${rooms.length} 个群：${rooms.map(room => room.nickname || room.roomid).join('、') || '未匹配'}`;
+    element('last-poll').textContent = `最近成功轮询：${time(status.last_poll_at)}`;
+    for (const [id, port, path] of [['desktop', status.desktop_port, '/vnc.html?autoconnect=1&resize=scale'], ['receiver', status.receiver_port, '/']]) {
+      const url = new URL(location.href); url.port = port; url.pathname = path.split('?')[0]; url.search = path.split('?')[1] || ''; element(id).href = url.href;
+    }
+    if (!initialized) { element('remark').value = status.config.room_remark; element('target').value = status.config.target_url; initialized = true; }
+    element('deliveries').replaceChildren();
+    if (!status.recent_deliveries.length) element('deliveries').textContent = '暂无记录。登录并匹配目标群后发送测试消息。';
+    for (const record of status.recent_deliveries) {
+      const node = document.createElement('div'); node.className = 'delivery';
+      node.textContent = `${record.delivered_at ? '✓ 已送达' : '等待重试'} · ${record.event_id.slice(0, 12)} · 尝试 ${record.attempts} 次 · ${time(record.delivered_at || record.created_at)}${record.last_error ? ' · ' + record.last_error : ''}`;
+      element('deliveries').append(node);
+    }
+  } catch (error) { element('connection').textContent = '采集端连接失败：' + error.message; element('connection').classList.remove('hidden'); }
+}
+element('config').onsubmit = async event => {
+  event.preventDefault();
+  try { await api('/api/config', {room_remark: element('remark').value, target_url: element('target').value}); element('saved').textContent = '已保存'; await refresh(); }
+  catch (error) { element('saved').textContent = error.message; }
+};
+element('retry').onclick = async () => {
+  try { const result = await api('/api/retry', {}); element('saved').textContent = `已安排 ${result.pending} 条消息重试`; await refresh(); }
+  catch (error) { element('saved').textContent = error.message; }
+};
+refresh(); setInterval(refresh, 3000);
+</script></body></html>
