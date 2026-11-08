@@ -6,7 +6,7 @@
 
 原始消息、收到的图片、备注和整理状态保存在 `messages`。入站重复按 `event_id` 去重，首次入库序号、接收时间、图片、备注和投递状态均不被覆盖。管理操作不删除消息。查询列由原 payload 回填，旧字段保留。
 
-`relay_jobs` 保存任务配置、确认游标、当前轮截止序号和下次执行时间。`relay_batches` 原子保存固定 ZIP、SHA256、消息范围、尝试次数和回执；`relay_batch_messages` 记录文件包实际包含的消息。文件包和图片均在独立中转器数据库中，打包期间不读取采集端目录或调用 WeBox。
+`relay_jobs` 保存任务配置、确认游标、当前轮截止序号和下次执行时间。`relay_batches` 原子保存固定 ZIP、SHA256、消息范围、投递配置快照、HTTP 请求头、尝试次数和回执；multipart 批次额外保存完整请求正文（包含 ZIP 副本），直传复用 archive 字节。`relay_batch_messages` 记录文件包实际包含的消息。文件包和图片均在独立中转器数据库中，打包期间不读取采集端目录或调用 WeBox。
 
 新任务默认暂停，必须明确设置接收地址并启用。每个任务一个独立游标，可选择所有群或具体 `{account_id, room_id}`。同一个消息可投递给多个任务，其“已发送”状态分别计算。消息查询 API 未指定任务时，“已发送”表示至少一个任务已获回执；指定任务后仅计算该任务。选择“仅新记录”时，创建前记录不会显示为该任务待发送。
 
@@ -31,7 +31,7 @@ receiver 通过 `COLLECTOR_CONTROL_URL`（默认 `http://collector:8081`）代�
 5. 回执验证成功后，以一个事务保存回执、标记该包已发送、推进游标。本轮分包会持续发送直到固定截止值，不需等待下一次 cron。
 6. 未选中的群不进入包。空范围不生成包，也不推进已确认游标。后续入库的迟到消息仍可进入下一轮，即使其微信时间更早。
 
-未完成一轮投递时不允许变更群范围，避免跳过记录。允许在没有请求进行时修正接收地址；待重试包保留相同字节和批次 ID，使用新地址重试。正在进行的请求不能编辑配置，可暂停后等其完成。外部地址更换可能意味着不同的外部系统，需要调用方自行核对已经被旧系统接受但尚未确认的包。
+未完成一轮投递时不允许变更群范围，避免跳过记录。批次生成时固定接收地址、请求头、投递方式、text、成功条件以及请求正文；编辑任务只作用于之后生成的批次（含当前轮尚未生成的后续分包），不改写待重试批次。正在进行的请求不能编辑配置，可暂停后等其完成。此规则取代旧版“修正地址后原批次改用新地址”的行为，保证同一 Idempotency-Key 对应同一请求。若必须使用新地址或新凭据重投，先暂停旧任务并核对外部接收记录，再创建新任务；新任务具有独立游标和批次身份，可能重复发送历史。
 
 完成一轮后修改群范围或接收地址继续沿用现有游标；要向新范围或新系统补发全部历史，请创建新任务。收起记录和添加备注不改变待发送范围；备注属于管理信息，不改原始消息或已生成包。
 
@@ -85,7 +85,7 @@ JSON 的 UTF-8 示例（标识为示意值）：
 
 ## 外部投递与回执
 
-请求为直接 ZIP 请求体，不使用 multipart：
+默认请求为直接 ZIP 请求体，旧任务和旧批次升级后保持此行为：
 
 ```http
 POST /configured-path HTTP/1.1
@@ -103,9 +103,41 @@ X-Weward-SHA256: <ZIP文件SHA256>
 {"ok": true, "batch_id": "与请求相同的批次ID", "receipt_id": "外部持久回执编号"}
 ```
 
-`ok` 必须是布尔 true，`batch_id` 必须与当前包完全一致，`receipt_id` 必须是非空字符串。额外字段随原回执一起保存。仅有 HTTP 200、HTTP 202/204 空正文、HTML、错误批次 ID 或负回执均不代表成功。重定向不跟随。没有异步回调或轮询回执接口；外部若需要长时间处理，应先可靠收包并回执，后续处理由外部负责。
+默认 `success_response: {"mode":"receipt"}`：`ok` 必须是布尔 true，`batch_id` 必须与当前包完全一致，`receipt_id` 必须是非空字符串。额外字段随原回执一起保存。仅有 HTTP 200、HTTP 202/204 空正文、HTML、错误批次 ID 或负回执均不代表成功。重定向不跟随。没有异步回调或轮询回执接口；外部若需要长时间处理，应先可靠收包并回执，后续处理由外部负责。
 
-HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时，可手动立即重试。所有重试沿用同一包字节、SHA256 和批次 ID。外部须按 `Idempotency-Key` 幂等，重复 POST 返回原回执；本端提供至少一次投递，无法单方保证跨系统恰好一次。
+### 自定义请求头与 multipart
+
+`headers` 是名称到字符串值的对象。名称按 HTTP token 校验且不区分大小写，不允许重复；值须为不含控制字符的 ASCII 字符串。Host、Content-Type、Content-Disposition、Content-Length、Transfer-Encoding、Connection、Trailer、Upgrade、Expect、Idempotency-Key 及所有 X-Weward-* 头由系统保留，不能覆盖。配置总大小不超过 64 KiB。
+
+所有自定义请求头值均按敏感值处理：写入配置和批次快照供实际投递使用，管理 API 只返回 `{ "Authorization": null }` 等名称映射；界面使用密码框。编辑时同名 `null` 保留原值（不区分大小写），字符串替换值，缺少整个 `headers` 字段保留全部，显式 `{}` 清空。已保存值不提供读回接口。响应回显的请求头敏感值在历史 API 中脱敏，日志和失败通知不包含这些值；成功回执原文仍保存在本地数据库内。
+
+`delivery_mode` 支持 `zip`（默认）或 `multipart`。multipart 使用固定 boundary 和 CRLF，字段为：
+
+| 字段 | 内容 |
+| --- | --- |
+| `files` | 单个 ZIP，filename=`weward-<batch_id>.zip`，Content-Type=`application/zip` |
+| `text` | 可选 UTF-8 文本；`null` 不发送，空字符串发送空字段，界面留空按不发送处理 |
+
+multipart 仍携带 Idempotency-Key、X-Weward-Batch-Id、X-Weward-Job-Id、X-Weward-SHA256；SHA256 针对原 ZIP，下载接口仍下载 ZIP。请求正文与 Content-Type 在批次生成时一起持久保存，重启后复用，不重新选择 boundary 或编码表单。
+
+### 自定义成功条件
+
+`success_response.mode="custom"` 时支持以下配置：
+
+```json
+{
+  "mode": "custom",
+  "status_codes": "2xx",
+  "response_field": "outcome",
+  "response_value": "submitted"
+}
+```
+
+`status_codes` 默认为 `"2xx"`，也可设为非空的 200–299 整数数组，例如 `[200,202]`。不接受其他范围或重定向。`response_field` 使用对象点路径，例如 `data.outcome`，不支持数组下标；填写字段后必须提供 JSON `response_value`，可为字符串、数值、布尔、null、数组或对象。字段必须存在且值相等；缺失不等于 null，布尔不等于数字，复合值内部也按此规则比较。状态码和 JSON 条件同时满足才成功，不要求额外提供旧协议的 ok、batch_id、receipt_id。
+
+字段为空时只判断状态码，允许 204 空正文和非 JSON 文本。任意成功模式均限制响应正文不超过 64 KiB。custom 回执以 `{"http_status":202,"body":<JSON值或原始文本>}` 保存；默认 receipt 模式仍保存原 JSON 对象，保持兼容。仅成功时同事务保存回执、标记 sent、推进游标并排队成功通知；HTTP 错误、非法 JSON、字段缺失/不匹配、超时均保留原批次等待重试。自定义回执无 receipt_id 时成功通知中的该占位符为空。
+
+HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时。任务列表「重试」或历史详情「立即重试」可清除退避时间，但不会绕过暂停或正在进行的请求租约。所有重试沿用同一地址、包字节、表单参数、请求头、成功条件、SHA256 和批次 ID。外部须按 `Idempotency-Key` 幂等，重复 POST 返回原回执；本端提供至少一次投递，无法单方保证跨系统恰好一次。
 
 请求使用数据库 120 秒租约避免同时投递同一批次，进程退出后的未完成请求在租约过期后可重试。准备包时短事务锁定写入，HTTP 请求期间不持有数据库写锁。一个后台线程顺序处理启用任务，单个慢目标可能延后其他任务。暂停阻止新请求，正在进行的请求仍可完成并记录回执。receiver 设置 40 秒停止宽限期，退出时等待当前请求收尾。
 
@@ -135,11 +167,12 @@ HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时�
 | `POST /api/messages/<event_id>/manage` | `{ "note": "备注", "archived": true }`，两字段均可单独更新 |
 | `GET /api/jobs` | 所有任务、待发送数、已确认数、当前失败信息 |
 | `POST /api/jobs` | 创建任务 |
-| `POST /api/jobs/<job_id>` | 完整更新任务配置，保留游标；start 字段仅创建时生效 |
+| `POST /api/jobs/<job_id>` | 更新任务配置，保留游标；新增投递字段省略时保留原值，start 字段仅创建时生效，已生成批次不变 |
 | `POST /api/jobs/<job_id>/enabled` | `{ "enabled": true }` 启用/暂停 |
 | `POST /api/jobs/<job_id>/run` | `{}` 启动本轮或立即重试原包；需要任务已启用，返回 202 |
 | `GET /api/batches` | 投递历史及回执；支持 job_id、before、limit（1–100，默认30） |
 | `GET /api/batches/<batch_id>/download` | 下载已持久保存的实际 ZIP 字节 |
+| `POST /api/batches/<batch_id>/retry` | `{}` 立即重试指定 pending 批次，返回 202；已完成、不存在、任务暂停时返回 400 |
 
 创建任务示例：
 
@@ -155,10 +188,26 @@ HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时�
 }
 ```
 
-`start` 为 `all` 或 `now`；后者取创建时最大入库序号作为起点。所有群使用 `rooms: []`。当前仅配置地址，不提供自定义鉴权头；需要鉴权的外部系统应另行约定适配。
+`start` 为 `all` 或 `now`；后者取创建时最大入库序号作为起点。所有群使用 `rooms: []`。省略新增字段时默认 `delivery_mode="zip"`、`headers={}`、`text=null`、`success_response={"mode":"receipt"}`。接入表单接口时可在创建任务对象中追加：
+
+```json
+{
+  "delivery_mode": "multipart",
+  "headers": {"Authorization": "Bearer example-token"},
+  "text": "本次群聊记录",
+  "success_response": {
+    "mode": "custom",
+    "status_codes": "2xx",
+    "response_field": "outcome",
+    "response_value": "submitted"
+  }
+}
+```
 
 ## 运行、存储与验证
 
 无第三方 Python 包；容器的系统时区数据供 `zoneinfo` 使用。默认保留消息、原图片、ZIP 和回执，多任务会各自保存包，磁盘使用会持续增长。当前不提供自动删除或保留期，以保留可重试原件和回执关联。
 
-执行 `python3 -m unittest discover -s tests -v` 验证迁移、原采集链路、真实本地 HTTP ZIP 投递、错误回执、响应丢失、重启恢复、事务回滚、并发租约、分群/分账号、分包、迟到消息和 cron 边界。外部系统真实地址与回执对接需要使用其实际接口另行验收。
+升级自动追加投递配置和请求快照列；旧任务、已完成回执和待重试 ZIP 保留原身份、字节及游标。旧待重试批次第一次尝试时持久保存默认 HTTP 请求头。回退应暂停任务、等请求结束并恢复旧版程序及升级前数据库备份；旧版程序不认识新增投递配置，不能直接处理含新配置的数据库。外部已接收的数据无法通过本地回退撤回。
+
+执行 `python3 -m unittest discover -s tests -v` 验证迁移、原采集链路、真实本地 HTTP ZIP/multipart 投递、请求头脱敏与保留/替换/删除、自定义成功条件、错误回执、响应丢失、修改配置与重启后请求逐字节不变、手动重试、事务回滚、并发租约、分群/分账号、分包、迟到消息和 cron 边界。外部系统真实地址与回执对接需要使用其实际接口另行验收。

@@ -54,6 +54,18 @@
   <label>执行计划<input id="job-cron" required value="0 9 * * *" aria-describedby="cron-hint"><small id="cron-hint">每天 9 点：0 9 * * *</small></label><label>时区<input id="job-timezone" required value="Asia/Shanghai"></label>
   <label id="job-start-field">首次范围<select id="job-start" aria-describedby="job-start-hint"><option value="all">包含已有消息</option><option value="now">仅创建后收到的消息</option></select><small id="job-start-hint">包含已有消息：从接收端已保存的历史开始。仅新消息：跳过创建任务前已入库的消息，按入库时间判断。之后每次只投递本任务尚未成功发送的消息；不会补抓微信历史。</small></label><label class="check-field"><input id="job-enabled" type="checkbox">启用任务</label>
   </div><fieldset><legend>群聊</legend><label class="check-field"><input id="job-all-rooms" type="checkbox" checked>全部群聊</label><div id="job-rooms" class="room-choices hidden"></div></fieldset>
+  <fieldset><legend>投递方式</legend><div class="form-grid">
+    <label>请求格式<select id="job-delivery-mode"><option value="zip">ZIP 直传（默认）</option><option value="multipart">multipart/form-data</option></select></label>
+    <label id="job-text-field" class="hidden">text 文本（可选）<textarea id="job-text" rows="3" placeholder="留空不发送 text 字段"></textarea><small>ZIP 文件放在 files 字段；文本按 UTF-8 发送。</small></label>
+  </div></fieldset>
+  <fieldset><legend>自定义请求头</legend><p class="field-hint">请求头值隐藏显示，保存后不回显。编辑时留空保留原值，移除行删除请求头。Content-Type 和 Idempotency-Key 等协议头由系统设置。</p><div id="job-headers"></div><button id="job-add-header" type="button" class="quiet">添加请求头</button></fieldset>
+  <fieldset><legend>成功条件</legend><div class="form-grid">
+    <label>判断方式<select id="job-success-mode"><option value="receipt">原回执校验（默认）</option><option value="custom">自定义响应条件</option></select><small>默认要求 HTTP 2xx、ok=true、匹配的 batch_id 和非空 receipt_id。</small></label>
+    <label id="job-status-field" class="hidden">成功状态码<input id="job-status-codes" value="2xx" placeholder="2xx 或 200,202"><small>只接受 200–299 范围内的状态码。</small></label>
+    <label id="job-response-field-label" class="hidden">JSON 字段（可选）<input id="job-response-field" placeholder="例如 outcome 或 data.outcome"><small>留空仅判断状态码；填写后两项必须同时满足。</small></label>
+    <label id="job-response-value-label" class="hidden">预期值（JSON）<input id="job-response-value" value="&quot;submitted&quot;" placeholder="&quot;submitted&quot;、true 或 0"></label>
+  </div></fieldset>
+  <p id="job-snapshot-hint" class="field-hint hidden">已有待重试批次会继续使用生成时的地址、请求头、文本和成功条件。本次修改仅用于新批次；重试可在任务或投递历史中手动触发。</p>
   <p id="job-form-error" class="inline-error hidden" role="alert"></p><footer class="dialog-footer"><button type="button" data-close="job-dialog">取消</button><button type="submit" id="save-job" class="primary">保存</button></footer>
 </form></dialog>
 <dialog id="detail-dialog"><header class="dialog-header"><h2 id="detail-title">详情</h2><button class="icon-button" data-close="detail-dialog" aria-label="关闭">×</button></header><div id="detail-content"></div></dialog>

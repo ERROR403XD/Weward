@@ -13,6 +13,7 @@ import uuid
 import zipfile
 
 from .common import database, encode_json, init_database, utc_now
+from .delivery import load_config, normalize_config, public_config, redact, request_payload, validate_response
 from .schedule import Cron
 
 
@@ -98,6 +99,17 @@ class Relay:
         self.max_messages = 500
         self.max_image_bytes = 32 * 1024 * 1024
         init_database(db_path, SCHEMA)
+        with database(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for table, additions in {
+                "relay_jobs": {"delivery_config": "TEXT NOT NULL DEFAULT '{}'"},
+                "relay_batches": {"delivery_config": "TEXT NOT NULL DEFAULT '{}'",
+                                  "request_headers": "TEXT", "request_body": "BLOB"},
+            }.items():
+                columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                for name, definition in additions.items():
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def notify(self, connection, event, batch, **values):
         if self.notifications:
@@ -140,26 +152,29 @@ class Relay:
         now = utc_now()
         with database(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            existing = None
             if job_id:
                 existing = connection.execute("SELECT * FROM relay_jobs WHERE job_id=?", (job_id,)).fetchone()
                 if not existing:
                     raise ValueError("任务不存在")
                 if existing["run_until"] is not None and normalized != json.loads(existing["rooms"]):
-                    raise ValueError("当前投递尚未完成，不能修改群范围；可修正接收地址或暂停任务")
+                    raise ValueError("当前投递尚未完成，不能修改群范围；可暂停任务")
                 pending = connection.execute("SELECT lease_until FROM relay_batches WHERE job_id=? AND status='pending'", (job_id,)).fetchone()
                 if pending and pending["lease_until"] > time.time():
                     raise ValueError("请求正在进行，请稍后编辑；可单独暂停任务")
+            config = normalize_config(values, load_config(existing["delivery_config"]) if existing else None)
+            serialized = encode_json(config).decode()
+            if existing:
                 connection.execute("""UPDATE relay_jobs SET name=?, target_url=?, cron=?, timezone=?, rooms=?,
-                    enabled=?, next_run=?, updated_at=? WHERE job_id=?""",
-                    (name.strip(), target_url, cron, timezone_name, json.dumps(normalized), enabled, next_run, now, job_id))
-                connection.execute("UPDATE relay_batches SET target_url=?, next_attempt=0 WHERE job_id=? AND status='pending'", (target_url, job_id))
+                    enabled=?, next_run=?, updated_at=?, delivery_config=? WHERE job_id=?""",
+                    (name.strip(), target_url, cron, timezone_name, json.dumps(normalized), enabled, next_run, now, serialized, job_id))
             else:
                 job_id = uuid.uuid4().hex
                 cursor = connection.execute("SELECT COALESCE(MAX(sequence),0) FROM messages").fetchone()[0] if start == "now" else 0
                 connection.execute("""INSERT INTO relay_jobs
-                    (job_id, name, target_url, cron, timezone, rooms, enabled, cursor, next_run, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (job_id, name.strip(), target_url, cron, timezone_name, json.dumps(normalized), enabled, cursor, next_run, now, now))
+                    (job_id, name, target_url, cron, timezone, rooms, enabled, cursor, next_run, created_at, updated_at, delivery_config)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (job_id, name.strip(), target_url, cron, timezone_name, json.dumps(normalized), enabled, cursor, next_run, now, now, serialized))
         return self.job(job_id)
 
     def jobs(self):
@@ -168,6 +183,8 @@ class Relay:
             result = []
             for row in rows:
                 job = dict(row)
+                config = load_config(job.pop("delivery_config"))
+                job.update(public_config(config))
                 job["rooms"] = json.loads(job["rooms"])
                 job["enabled"] = bool(job["enabled"])
                 clause, parameters = room_condition(job["rooms"])
@@ -176,7 +193,7 @@ class Relay:
                 job["sent_count"] = connection.execute(
                     "SELECT COALESCE(SUM(message_count),0) FROM relay_batches WHERE job_id=? AND status='sent'", (job["job_id"],)).fetchone()[0]
                 pending = connection.execute("""SELECT batch_id, attempts, next_attempt, last_error, message_count,
-                    lease_until FROM relay_batches WHERE job_id=? AND status='pending'""", (job["job_id"],)).fetchone()
+                    lease_until, target_url FROM relay_batches WHERE job_id=? AND status='pending'""", (job["job_id"],)).fetchone()
                 job["pending"] = dict(pending) if pending else None
                 result.append(job)
         return result
@@ -205,6 +222,21 @@ class Relay:
                 connection.execute("UPDATE relay_jobs SET run_until=? WHERE job_id=?", (cutoff, job_id))
             connection.execute("UPDATE relay_batches SET next_attempt=0 WHERE job_id=? AND status='pending'", (job_id,))
         return self.job(job_id)
+
+    def retry_batch(self, batch_id):
+        with database(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            batch = connection.execute("""SELECT batches.job_id, batches.status, jobs.enabled
+                FROM relay_batches batches JOIN relay_jobs jobs ON jobs.job_id=batches.job_id
+                WHERE batch_id=?""", (batch_id,)).fetchone()
+            if not batch:
+                raise ValueError("批次不存在")
+            if batch["status"] != "pending":
+                raise ValueError("批次已完成，无需重试")
+            if not batch["enabled"]:
+                raise ValueError("请先启用任务")
+            connection.execute("UPDATE relay_batches SET next_attempt=0 WHERE batch_id=?", (batch_id,))
+        return self.job(batch["job_id"])
 
     def schedule_due(self, now):
         with database(self.db_path) as connection:
@@ -269,10 +301,15 @@ class Relay:
             rows = connection.execute(f"SELECT * FROM messages WHERE sequence IN ({','.join('?' for _ in selected)}) ORDER BY sequence", selected).fetchall()
             batch_id, created_at = uuid.uuid4().hex, utc_now()
             archive = self.build_archive(batch_id, job, rows, cutoff, created_at)
+            sha256 = hashlib.sha256(archive).hexdigest()
+            config = load_config(job["delivery_config"])
+            headers, body = request_payload(batch_id, job_id, sha256, archive, config)
             connection.execute("""INSERT INTO relay_batches
-                (batch_id, job_id, from_sequence, through_sequence, message_count, target_url, sha256, archive, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (batch_id, job_id, job["cursor"], cutoff, len(rows), job["target_url"], hashlib.sha256(archive).hexdigest(), archive, created_at))
+                (batch_id, job_id, from_sequence, through_sequence, message_count, target_url, sha256, archive, created_at,
+                 delivery_config, request_headers, request_body)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (batch_id, job_id, job["cursor"], cutoff, len(rows), job["target_url"], sha256, archive, created_at,
+                 encode_json(config).decode(), encode_json(headers).decode(), body if config["delivery_mode"] == "multipart" else None))
             connection.executemany("INSERT INTO relay_batch_messages (batch_id, sequence) VALUES (?, ?)",
                                    ((batch_id, row["sequence"]) for row in rows))
             connection.execute("UPDATE relay_jobs SET last_error=NULL WHERE job_id=?", (job_id,))
@@ -290,26 +327,26 @@ class Relay:
             if not claimed:
                 return False
             batch = connection.execute("SELECT * FROM relay_batches WHERE batch_id=?", (batch_id,)).fetchone()
+            config = load_config(batch["delivery_config"])
+            if batch["request_headers"] is None:
+                # Old pending batches keep their original target, ZIP and default receipt contract.
+                headers, body = request_payload(batch_id, batch["job_id"], batch["sha256"], batch["archive"], config)
+                connection.execute("UPDATE relay_batches SET request_headers=?, request_body=? WHERE batch_id=?",
+                                   (encode_json(headers).decode(), body if config["delivery_mode"] == "multipart" else None, batch_id))
+            else:
+                headers = json.loads(batch["request_headers"])
+                body = batch["request_body"] if batch["request_body"] is not None else batch["archive"]
             self.notify(connection, "delivery_started", batch)
         http_status = ""
         try:
-            request = urllib.request.Request(batch["target_url"], data=batch["archive"], headers={
-                "Content-Type": "application/zip", "Content-Disposition": f'attachment; filename="weward-{batch_id}.zip"',
-                "Idempotency-Key": batch_id, "X-Weward-Batch-Id": batch_id,
-                "X-Weward-SHA256": batch["sha256"], "X-Weward-Job-Id": batch["job_id"],
-            }, method="POST")
+            request = urllib.request.Request(batch["target_url"], data=body, headers=headers, method="POST")
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
             with opener.open(request, timeout=30) as response:
                 http_status = response.status
-                if not 200 <= response.status < 300:
-                    raise ValueError(f"外部接口返回 HTTP {response.status}")
-                body = response.read(65537)
-                if len(body) > 65536:
-                    raise ValueError("回执超过 64 KiB")
-                receipt = json.loads(body)
-            if (not isinstance(receipt, dict) or receipt.get("ok") is not True or receipt.get("batch_id") != batch_id
-                    or not isinstance(receipt.get("receipt_id"), str) or not receipt["receipt_id"].strip()):
-                raise ValueError("回执需包含 ok=true、匹配的 batch_id 和非空 receipt_id")
+                receipt = validate_response(http_status, response.read(65537), batch_id, config["success_response"])
+            receipt_body = receipt if config["success_response"]["mode"] == "receipt" else receipt["body"]
+            receipt_id = receipt_body.get("receipt_id", "") if isinstance(receipt_body, dict) else ""
+            receipt_id = redact(receipt_id, config["headers"]) if isinstance(receipt_id, str) else ""
             with database(self.db_path) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 changed = connection.execute("""UPDATE relay_batches SET status='sent', receipt=?, sent_at=?,
@@ -319,19 +356,23 @@ class Relay:
                     connection.execute("""UPDATE relay_jobs SET cursor=?,
                         run_until=CASE WHEN run_until<=? THEN NULL ELSE run_until END WHERE job_id=?""",
                         (batch["through_sequence"], batch["through_sequence"], batch["job_id"]))
-                    self.notify(connection, "delivery_succeeded", batch, http_status=http_status, receipt_id=receipt["receipt_id"])
+                    self.notify(connection, "delivery_succeeded", batch, http_status=http_status, receipt_id=receipt_id)
             logging.info("relay_sent batch=%s count=%s", batch_id, batch["message_count"])
         except Exception as error:
             if isinstance(error, urllib.error.HTTPError):
                 http_status = error.code
+                error.close()
+                detail = f"外部接口返回 HTTP {http_status}"
+            else:
+                detail = redact(str(error), config["headers"])[:1000]
             delay = min(3600, 2 ** min(batch["attempts"], 12))
             with database(self.db_path) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 changed = connection.execute("""UPDATE relay_batches SET last_error=?, next_attempt=?, lease_until=0, claim_token=NULL
                     WHERE batch_id=? AND status='pending' AND claim_token=?""",
-                    (str(error)[:1000], time.time() + delay, batch_id, claim_token)).rowcount
+                    (detail, time.time() + delay, batch_id, claim_token)).rowcount
                 if changed:
-                    self.notify(connection, "delivery_failed", batch, http_status=http_status, error=str(error)[:1000])
+                    self.notify(connection, "delivery_failed", batch, http_status=http_status, error=detail)
             logging.warning("relay_retry batch=%s attempt=%s error=%s", batch_id, batch["attempts"], type(error).__name__)
         return True
 
@@ -369,12 +410,14 @@ class Relay:
         with database(self.db_path) as connection:
             rows = connection.execute("""SELECT batch_id, job_id, status, from_sequence, through_sequence,
                 message_count, sha256, LENGTH(archive) AS size, created_at, sent_at, attempts, next_attempt,
-                last_error, receipt FROM relay_batches WHERE (? IS NULL OR job_id=?)
+                last_error, receipt, target_url, delivery_config FROM relay_batches WHERE (? IS NULL OR job_id=?)
                 AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?""", (job_id, job_id, before, before, limit)).fetchall()
             result = []
             for row in rows:
                 batch = dict(row)
-                batch["receipt"] = json.loads(batch["receipt"]) if batch["receipt"] else None
+                config = load_config(batch.pop("delivery_config"))
+                batch.update(public_config(config))
+                batch["receipt"] = redact(json.loads(batch["receipt"]), config["headers"]) if batch["receipt"] else None
                 batch["sequence"] = connection.execute("SELECT rowid FROM relay_batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()[0]
                 result.append(batch)
         return result

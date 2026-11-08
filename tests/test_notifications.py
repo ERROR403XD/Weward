@@ -199,6 +199,7 @@ class NotificationsTest(unittest.TestCase):
     def test_relay_failure_and_success_do_not_wait_for_notifications(self):
         destination = make_server(("127.0.0.1", 0), Destination, None)
         destination.requests, destination.receipts, destination.mode = [], {}, "wrong-id"
+        destination.paths = []
         destination.entered, destination.release = threading.Event(), threading.Event()
         destination.release.set()
         self.start(destination)

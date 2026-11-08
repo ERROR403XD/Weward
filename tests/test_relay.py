@@ -10,11 +10,14 @@ import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
+from unittest.mock import patch
 
 from weward.common import Handler, database, encode_json, init_database, make_server, request_json
 from weward.receiver import Receiver, ReceiverHandler, SCHEMA
-from weward.relay import Relay, message_links
+from weward.relay import Relay, SCHEMA as RELAY_SCHEMA, message_links
 from weward.schedule import Cron
 
 
@@ -40,8 +43,13 @@ class Destination(Handler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         batch_id = self.headers["X-Weward-Batch-Id"]
         self.server.requests.append((dict(self.headers), body))
+        self.server.paths.append(self.path)
         self.server.entered.set()
         self.server.release.wait(3)
+        if self.server.mode == "custom":
+            status, body = self.server.custom_response
+            self.send_bytes(body, "application/json", status)
+            return
         if self.server.mode == "redirect":
             self.send_response(307)
             self.send_header("Location", "/success")
@@ -78,6 +86,7 @@ class RelayTest(unittest.TestCase):
         self.servers = []
         self.destination = make_server(("127.0.0.1", 0), Destination, None)
         self.destination.requests, self.destination.receipts = [], {}
+        self.destination.paths = []
         self.destination.mode = "ok"
         self.destination.entered, self.destination.release = threading.Event(), threading.Event()
         self.destination.release.set()
@@ -263,7 +272,7 @@ class RelayTest(unittest.TestCase):
         self.assertTrue(Relay(self.receiver.db_path).deliver_batch(batch_id))
         self.assertEqual(self.relay.job(job["job_id"])["sent_count"], 2)
 
-    def test_pending_destination_can_be_corrected_without_repacking(self):
+    def test_pending_destination_is_frozen_and_edits_apply_to_future_batches(self):
         self.receiver.receive(event("bad-url"))
         job = self.job()
         self.destination.mode = "lost"
@@ -273,9 +282,310 @@ class RelayTest(unittest.TestCase):
             self.relay.save_job({**job, "rooms": [{"account_id": "account-a", "room_id": "room-a"}]}, job["job_id"])
         self.relay.save_job({**job, "target_url": self.url + "-corrected"}, job["job_id"])
         self.destination.mode = "ok"
-        self.relay.tick()
+        self.run_job(job)
         self.assertEqual(self.relay.batches()[0]["status"], "sent")
         self.assertEqual(self.relay.archive(batch["batch_id"]), original)
+        self.assertEqual(self.destination.paths, ["/upload", "/upload"])
+        self.receiver.receive(event("new-destination"))
+        self.run_job(job)
+        self.assertEqual(self.destination.paths[-1], "/upload-corrected")
+
+    def custom_response(self, body, status=202):
+        self.destination.mode = "custom"
+        self.destination.custom_response = status, encode_json(body)
+
+    def test_custom_headers_masked_in_api_preserved_on_edit_and_removable(self):
+        server = make_server(("127.0.0.1", 0), ReceiverHandler, self.receiver)
+        self.start(server)
+        base = f"http://127.0.0.1:{server.server_port}/api/jobs"
+        values = {"name": "headers", "target_url": self.url, "enabled": True,
+                  "headers": {"Authorization": "Bearer private-token", "X-Api-Key": "private-key", "X-Client": "weward"}}
+        with self.assertLogs(level="INFO") as logs:
+            job = request_json(base, values)
+            self.assertEqual(job["headers"], {key: None for key in values["headers"]})
+            self.assertNotIn("private-", json.dumps(request_json(base)))
+            job = request_json(base + "/" + job["job_id"], {**job, "name": "edited"})
+            self.receiver.receive(event("header-request"))
+            request_json(base + "/" + job["job_id"] + "/run", {})
+            self.relay.tick()
+        self.assertNotIn("private-", "\n".join(logs.output))
+        headers = self.destination.requests[-1][0]
+        self.assertEqual(headers["Authorization"], "Bearer private-token")
+        self.assertEqual(headers["X-Api-Key"], "private-key")
+        self.assertEqual(headers["X-Client"], "weward")
+        job = request_json(base + "/" + job["job_id"], {
+            **job, "headers": {"authorization": None, "X-Api-Key": "replacement-key"}})
+        legacy_edit = {key: job[key] for key in ("name", "target_url", "enabled", "rooms", "cron", "timezone")}
+        request_json(base + "/" + job["job_id"], legacy_edit)
+        self.receiver.receive(event("edited-headers"))
+        self.run_job(job)
+        headers = self.destination.requests[-1][0]
+        self.assertEqual(headers["Authorization"], "Bearer private-token")
+        self.assertEqual(headers["X-Api-Key"], "replacement-key")
+        self.assertNotIn("X-Client", headers)
+        request_json(base + "/" + job["job_id"], {**job, "headers": {}})
+        self.receiver.receive(event("removed-headers"))
+        self.run_job(job)
+        self.assertNotIn("Authorization", self.destination.requests[-1][0])
+        self.assertNotIn("X-Api-Key", self.destination.requests[-1][0])
+
+    def test_multipart_file_and_optional_unicode_text(self):
+        self.receiver.receive(image_event("multipart"))
+        for text in (None, "", '中文说明\r\n"quotes" & symbols'):
+            with self.subTest(text=text):
+                job = self.job(delivery_mode="multipart", text=text)
+                batch = self.run_job(job)[0]
+                self.assertEqual(batch["status"], "sent")
+                headers, body = self.destination.requests[-1]
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+                self.assertEqual(headers["Idempotency-Key"], batch["batch_id"])
+                message = BytesParser(policy=policy.default).parsebytes(
+                    f'Content-Type: {headers["Content-Type"]}\r\n\r\n'.encode() + body)
+                parts = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
+                self.assertEqual(set(parts), {"files"} if text is None else {"files", "text"})
+                self.assertEqual(parts["files"].get_filename(), f'weward-{batch["batch_id"]}.zip')
+                self.assertEqual(parts["files"].get_content_type(), "application/zip")
+                archive = parts["files"].get_payload(decode=True)
+                self.assertEqual(archive, self.relay.archive(batch["batch_id"]))
+                self.assertEqual(hashlib.sha256(archive).hexdigest(), headers["X-Weward-Sha256"])
+                if text is not None:
+                    self.assertEqual(parts["text"].get_payload(decode=True).decode("utf-8"), text)
+
+    def test_custom_response_requires_both_http_status_and_json_value(self):
+        self.receiver.receive(event("custom-response"))
+        job = self.job(success_response={"mode": "custom", "status_codes": [202],
+                                        "response_field": "data.outcome", "response_value": "submitted"})
+        cases = [
+            ({"data": {"outcome": "submitted"}}, 200),
+            ({"data": {"outcome": "submitted"}}, 500),
+            ({"data": {"outcome": "rejected"}}, 202),
+            ({"data": {"outcome": True}}, 202),
+            ({"data": {"outcome": None}}, 202),
+            ({"data": {}}, 202), ({"data": []}, 202),
+            ({"data.outcome": "submitted"}, 202),
+        ]
+        for body, status in cases:
+            with self.subTest(body=body, status=status):
+                self.custom_response(body, status)
+                batch = self.run_job(job)[0]
+                self.assertEqual(batch["status"], "pending")
+                self.assertIsNone(batch["receipt"])
+                self.assertEqual(self.relay.job(job["job_id"])["cursor"], 0)
+        for body in (b"", b"not-json", b'{"data":{"outcome":NaN}}', b'{"data":"\xff"}', b"x" * 65537):
+            with self.subTest(body=body[:40]):
+                self.destination.custom_response = 202, body
+                self.assertEqual(self.run_job(job)[0]["status"], "pending")
+                self.assertEqual(self.relay.job(job["job_id"])["cursor"], 0)
+        result = {"data": {"outcome": "submitted"}, "tracking_id": "external-123"}
+        self.custom_response(result)
+        batch = self.run_job(job)[0]
+        self.assertEqual(batch["status"], "sent")
+        self.assertEqual(batch["receipt"], {"http_status": 202, "body": result})
+        self.assertEqual(self.relay.job(job["job_id"])["cursor"], 1)
+
+    def test_custom_json_equality_distinguishes_missing_null_booleans_and_numbers(self):
+        self.receiver.receive(event("json-equality"))
+        for expected, rejected in ((None, {}), (True, {"outcome": 1}), (0, {"outcome": False}),
+                                   ({"ok": True}, {"outcome": {"ok": 1}}),
+                                   ([True, None], {"outcome": [1, None]})):
+            with self.subTest(expected=expected):
+                job = self.job(success_response={"mode": "custom", "response_field": "outcome", "response_value": expected})
+                self.custom_response(rejected)
+                self.assertEqual(self.run_job(job)[0]["status"], "pending")
+                self.custom_response({"outcome": expected})
+                self.assertEqual(self.run_job(job)[0]["status"], "sent")
+
+    def test_status_only_rule_records_empty_text_and_json_responses(self):
+        self.receiver.receive(event("status-only"))
+        for status, body, expected in ((204, b"", ""), (200, b"accepted", "accepted"),
+                                       (202, b'{"outcome":"submitted"}', {"outcome": "submitted"})):
+            with self.subTest(status=status):
+                job = self.job(success_response={"mode": "custom"})
+                self.destination.mode = "custom"
+                self.destination.custom_response = status, body
+                batch = self.run_job(job)[0]
+                self.assertEqual(batch["status"], "sent")
+                self.assertEqual(batch["receipt"], {"http_status": status, "body": expected})
+        for mode in ("redirect", "lost"):
+            self.destination.mode = mode
+            job = self.job(success_response={"mode": "custom"})
+            before = len(self.destination.requests)
+            self.assertEqual(self.run_job(job)[0]["status"], "pending")
+            self.assertEqual(len(self.destination.requests), before + 1)
+
+    def test_multipart_snapshot_survives_edits_restart_and_manual_retry(self):
+        self.receiver.receive(image_event("snapshot"))
+        job = self.job(delivery_mode="multipart", text="original text",
+                       headers={"Authorization": "Bearer original-token"},
+                       success_response={"mode": "custom", "response_field": "outcome", "response_value": "submitted"})
+        self.custom_response({"outcome": "queued"})
+        batch = self.run_job(job)[0]
+        original_request = self.destination.requests[-1]
+        original_archive = self.relay.archive(batch["batch_id"])
+        edited = self.relay.save_job({**job, "target_url": self.url + "-new", "delivery_mode": "zip",
+                                     "text": "new text", "headers": {"Authorization": "Bearer new-token"},
+                                     "success_response": {"mode": "receipt"}}, job["job_id"])
+        with database(self.receiver.db_path) as connection:
+            connection.execute("UPDATE relay_batches SET next_attempt=? WHERE batch_id=?", (time.time() + 3600, batch["batch_id"]))
+        self.receiver = Receiver(self.root)
+        self.relay = self.receiver.relay
+        self.custom_response({"outcome": "submitted"})
+        self.relay.tick()
+        self.assertEqual(len(self.destination.requests), 1)
+        server = make_server(("127.0.0.1", 0), ReceiverHandler, self.receiver)
+        self.start(server)
+        request_json(f"http://127.0.0.1:{server.server_port}/api/batches/{batch['batch_id']}/retry", {})
+        self.relay.tick()
+        completed = self.relay.batches()[0]
+        self.assertEqual(completed["status"], "sent")
+        self.assertEqual(completed["batch_id"], batch["batch_id"])
+        self.assertEqual(completed["attempts"], 2)
+        self.assertEqual(self.destination.requests[-1], original_request)
+        self.assertEqual(self.destination.paths, ["/upload", "/upload"])
+        self.assertEqual(self.relay.archive(batch["batch_id"]), original_archive)
+        self.receiver.receive(event("future-snapshot"))
+        self.destination.mode = "ok"
+        future = self.run_job(edited)[0]
+        self.assertEqual(future["status"], "sent")
+        self.assertNotEqual(future["batch_id"], batch["batch_id"])
+        headers, body = self.destination.requests[-1]
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        self.assertEqual(headers["Authorization"], "Bearer new-token")
+        self.assertEqual(self.destination.paths[-1], "/upload-new")
+        self.assertEqual(body, self.relay.archive(future["batch_id"]))
+
+    def test_batch_retry_rejects_completed_missing_and_paused_batches(self):
+        self.receiver.receive(event("retry-controls"))
+        job = self.job()
+        self.destination.mode = "lost"
+        batch = self.run_job(job)[0]
+        self.relay.set_enabled(job["job_id"], False)
+        with self.assertRaisesRegex(ValueError, "启用"):
+            self.relay.retry_batch(batch["batch_id"])
+        self.relay.set_enabled(job["job_id"], True)
+        self.destination.mode = "ok"
+        self.relay.retry_batch(batch["batch_id"])
+        self.relay.tick()
+        self.receiver.receive(event("not-retried"))
+        with self.assertRaisesRegex(ValueError, "已完成"):
+            self.relay.retry_batch(batch["batch_id"])
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            self.relay.retry_batch("0" * 32)
+        self.relay.tick()
+        self.assertEqual(len(self.destination.requests), 2)
+        self.assertEqual(self.relay.job(job["job_id"])["cursor"], 1)
+
+    def test_custom_receipt_cursor_and_notifications_commit_atomically(self):
+        config = self.receiver.notifications.config()
+        self.receiver.notifications.save({**config, "enabled": True, "target_url": self.url + "/notify"})
+        self.receiver.receive(event("custom-transaction"))
+        job = self.job(success_response={"mode": "custom", "response_field": "outcome", "response_value": "submitted"})
+        self.custom_response({"outcome": "submitted"})
+        with database(self.receiver.db_path) as connection:
+            connection.execute("""CREATE TRIGGER reject_custom_cursor BEFORE UPDATE OF cursor ON relay_jobs
+                BEGIN SELECT RAISE(ABORT, 'simulated database failure'); END""")
+        batch = self.run_job(job)[0]
+        self.assertEqual(batch["status"], "pending")
+        self.assertIsNone(batch["receipt"])
+        self.assertEqual(self.relay.job(job["job_id"])["cursor"], 0)
+        self.assertNotIn("delivery_succeeded", [row["event"] for row in self.receiver.notifications.history()])
+        with database(self.receiver.db_path) as connection:
+            connection.execute("DROP TRIGGER reject_custom_cursor")
+        self.assertEqual(self.run_job(job)[0]["status"], "sent")
+        self.assertEqual(self.relay.job(job["job_id"])["cursor"], 1)
+        history = self.receiver.notifications.history()
+        self.assertEqual(sum(row["event"] == "delivery_succeeded" for row in history), 1)
+
+    def test_secrets_are_redacted_from_errors_receipts_logs_and_notifications(self):
+        secret, api_key = "secret-unique-123", "key-unique-456"
+        config = self.receiver.notifications.config()
+        self.receiver.notifications.save({**config, "enabled": True, "target_url": self.url + "/notify"})
+        self.receiver.receive(event("secret-errors"))
+        job = self.job(headers={"Authorization": "Bearer " + secret, "X-Api-Key": api_key},
+                       success_response={"mode": "custom", "response_field": "outcome", "response_value": "submitted"})
+        with self.assertLogs(level="INFO") as logs:
+            with patch("weward.relay.urllib.request.OpenerDirector.open",
+                       side_effect=ValueError(f"failed with Bearer {secret} and {api_key}")):
+                batch = self.run_job(job)[0]
+            self.assertEqual(batch["status"], "pending")
+            self.assertIn("[hidden]", batch["last_error"])
+            self.custom_response({"outcome": "submitted", "echo": secret, "receipt_id": api_key,
+                                  "headers": {"Authorization": "Bearer " + secret, "X-Api-Key": api_key}})
+            self.assertEqual(self.run_job(job)[0]["status"], "sent")
+        server = make_server(("127.0.0.1", 0), ReceiverHandler, self.receiver)
+        self.start(server)
+        base = f"http://127.0.0.1:{server.server_port}"
+        exposed = json.dumps([request_json(base + "/api/jobs"), request_json(base + "/api/batches"),
+                              request_json(base + "/api/messages"), self.receiver.notifications.history()])
+        with database(self.receiver.db_path) as connection:
+            stored_receipt = connection.execute("SELECT receipt FROM relay_batches").fetchone()[0]
+            notifications = str([dict(row) for row in connection.execute("SELECT * FROM notification_outbox")])
+        self.assertIn(secret, stored_receipt)
+        for output in (exposed, notifications, "\n".join(logs.output)):
+            self.assertNotIn(secret, output)
+            self.assertNotIn(api_key, output)
+
+    def test_delivery_config_rejects_protocol_overrides_and_invalid_values(self):
+        invalid = [
+            {"delivery_mode": "json"}, {"text": 123}, {"headers": []},
+            {"headers": {"Authorization": None}}, {"headers": {"A": "v", "a": "duplicate"}},
+            {"headers": {"Bad Name": "v"}}, {"headers": {"Authorization": "private\r\ninjected"}},
+            {"headers": {"Authorization": "private\x00"}}, {"headers": {"Authorization": "private\x7f"}},
+            {"headers": {"Authorization": "中文"}}, {"headers": {"Authorization": True}},
+            {"headers": {"X-Large": "x" * 65536}},
+            {"success_response": []}, {"success_response": {"mode": "unknown"}},
+            {"success_response": {"mode": "custom", "status_codes": []}},
+            {"success_response": {"mode": "custom", "status_codes": [500]}},
+            {"success_response": {"mode": "custom", "status_codes": [True]}},
+            {"success_response": {"mode": "custom", "status_codes": "200"}},
+            {"success_response": {"mode": "custom", "response_field": "outcome"}},
+            {"success_response": {"mode": "custom", "response_field": "a..b", "response_value": True}},
+            {"success_response": {"mode": "custom", "response_field": "outcome", "response_value": float("nan")}},
+        ]
+        invalid += [{"headers": {name: "private"}} for name in
+                    ("cOnTeNt-TyPe", "CONTENT-LENGTH", "Content-Disposition", "Host", "Transfer-Encoding",
+                     "Idempotency-Key", "X-Weward-Batch-Id", "X-Weward-SHA256", "Connection")]
+        for values in invalid:
+            with self.subTest(values=str(values)[:100]), self.assertRaises(ValueError) as error:
+                self.job(**values)
+            self.assertNotIn("private", str(error.exception))
+
+    def test_legacy_jobs_and_pending_batches_migrate_without_changing_contract(self):
+        self.receiver.receive(image_event("legacy-sent"))
+        job = self.job()
+        sent = self.run_job(job)[0]
+        self.receiver.receive(event("legacy-pending"))
+        self.destination.mode = "lost"
+        pending = self.run_job(job)[0]
+        archive = self.relay.archive(pending["batch_id"])
+        old_root = self.root / "legacy-relay"
+        path = old_root / "receiver.sqlite3"
+        init_database(path, SCHEMA + RELAY_SCHEMA)
+        with database(self.receiver.db_path) as source, database(path) as target:
+            for table in ("messages", "relay_jobs", "relay_batches", "relay_batch_messages"):
+                columns = [row["name"] for row in target.execute(f"PRAGMA table_info({table})")]
+                for row in source.execute(f"SELECT {','.join(columns)} FROM {table}"):
+                    target.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", tuple(row))
+        self.receiver = Receiver(old_root)
+        self.relay = self.receiver.relay
+        migrated = self.relay.job(job["job_id"])
+        self.assertEqual(migrated["delivery_mode"], "zip")
+        self.assertEqual(migrated["headers"], {})
+        self.assertEqual(migrated["success_response"], {"mode": "receipt"})
+        self.assertEqual(migrated["cursor"], 1)
+        self.assertEqual(self.relay.archive(pending["batch_id"]), archive)
+        self.assertEqual(self.relay.batches()[1]["receipt"], sent["receipt"])
+        # A generic 2xx acknowledgement must not accidentally satisfy the old contract.
+        self.custom_response({"outcome": "submitted"})
+        self.assertEqual(self.run_job(migrated)[0]["status"], "pending")
+        self.destination.mode = "ok"
+        self.relay = Receiver(old_root).relay
+        completed = self.run_job(migrated)[0]
+        self.assertEqual(completed["status"], "sent")
+        self.assertEqual(completed["batch_id"], pending["batch_id"])
+        self.assertEqual(self.relay.job(job["job_id"])["cursor"], 2)
+        self.assertEqual(self.destination.requests[-1][1], archive)
+        self.assertEqual(self.destination.requests[-1][0]["Content-Type"], "application/zip")
 
     def test_empty_or_nonmatching_run_does_not_create_or_advance(self):
         self.receiver.receive(event("not-selected", room="room-b"))

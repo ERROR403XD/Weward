@@ -134,11 +134,16 @@ async function loadJobs() {
 }
 function showBatch(batch) {
   const content = openDetail('投递详情'); const job = state.jobs.find(job => job.job_id === batch.job_id);
-  content.append(metadata([['任务', job?.name || batch.job_id], ['生成时间', time(batch.created_at)], ['确认时间', time(batch.sent_at)], ['消息数', batch.message_count], ['尝试次数', batch.attempts], ['结果', batch.status === 'sent' ? '成功' : batch.last_error ? '失败，等待重试' : '等待投递']]));
+  content.append(metadata([['任务', job?.name || batch.job_id], ['生成时间', time(batch.created_at)], ['确认时间', time(batch.sent_at)], ['消息数', batch.message_count], ['尝试次数', batch.attempts], ['接收地址', batch.target_url], ['投递方式', batch.delivery_mode === 'multipart' ? 'multipart/form-data' : 'ZIP 直传'], ['结果', batch.status === 'sent' ? '成功' : batch.last_error ? '失败，等待重试' : '等待投递']]));
   if (batch.last_error) content.append(node('p', batch.last_error, 'inline-error'));
   if (batch.receipt) { content.append(node('h2', '回执'), node('pre', JSON.stringify(batch.receipt, null, 2))); }
   const download = node('a', '下载文件包'); download.href = `/api/batches/${batch.batch_id}/download`; download.download = `weward-${batch.batch_id}.zip`; content.append(download);
-  const details = node('details'); details.append(node('summary', '批次信息'), node('pre', JSON.stringify({ batch_id: batch.batch_id, sha256: batch.sha256, from_sequence: batch.from_sequence, through_sequence: batch.through_sequence }, null, 2))); content.append(details);
+  if (batch.status === 'pending') {
+    const retry = action('立即重试', async () => { await api(`/api/batches/${batch.batch_id}/retry`, {}); element('detail-dialog').close(); toast('已安排原批次重试'); await loadJobs(); }, 'quiet', 'batch-detail-error'); retry.disabled = !job?.enabled;
+    const error = node('p', undefined, 'inline-error hidden'); error.id = 'batch-detail-error'; content.append(retry, error);
+    if (!job?.enabled) content.append(node('p', '请先启用任务，再重试此批次。', 'field-hint'));
+  }
+  const details = node('details'); details.append(node('summary', '批次信息'), node('pre', JSON.stringify({ batch_id: batch.batch_id, sha256: batch.sha256, from_sequence: batch.from_sequence, through_sequence: batch.through_sequence, success_response: batch.success_response, headers: Object.fromEntries(Object.keys(batch.headers || {}).map(key => [key, '已隐藏'])), text: batch.text }, null, 2))); content.append(details);
 }
 async function loadHistory() {
   const request = ticket('history'); const query = new URLSearchParams(); if (element('history-job').value) query.set('job_id', element('history-job').value); if (state.historyBefore) query.set('before', state.historyBefore);
@@ -160,10 +165,28 @@ async function jobView(view) {
 function openJob(job = null) {
   state.editing = job?.job_id || null; element('job-form').reset(); errorAt('job-form-error', null); element('job-form-title').textContent = job ? '编辑任务' : '新建任务';
   for (const [id, value] of Object.entries({ 'job-name': job?.name || '', 'job-url': job?.target_url || '', 'job-cron': job?.cron || '0 9 * * *', 'job-timezone': job?.timezone || 'Asia/Shanghai' })) element(id).value = value;
+  element('job-delivery-mode').value = job?.delivery_mode || 'zip'; element('job-text').value = job?.text ?? '';
+  const rule = job?.success_response || { mode: 'receipt' };
+  element('job-success-mode').value = rule.mode; element('job-status-codes').value = Array.isArray(rule.status_codes) ? rule.status_codes.join(',') : '2xx';
+  element('job-response-field').value = rule.response_field || ''; element('job-response-value').value = 'response_value' in rule ? JSON.stringify(rule.response_value) : '"submitted"';
+  element('job-headers').replaceChildren(); for (const name of Object.keys(job?.headers || {})) addJobHeader(name);
+  element('job-snapshot-hint').classList.toggle('hidden', !job?.pending); updateDeliveryFields();
   element('job-enabled').checked = job?.enabled || false; element('job-start-field').classList.toggle('hidden', Boolean(job)); element('job-all-rooms').checked = !job?.rooms.length;
   const rooms = new Map([...state.rooms, ...(state.monitoring?.rooms || [])].map(room => [roomKey(room), room])); for (const room of job?.rooms || []) if (!rooms.has(roomKey(room))) rooms.set(roomKey(room), room);
   element('job-rooms').replaceChildren(...[...rooms.values()].map(room => { const label = node('label', undefined, 'check-field'); const input = node('input'); input.type = 'checkbox'; input.value = JSON.stringify({ account_id: room.account_id, room_id: room.room_id }); input.checked = Boolean(job?.rooms.some(selected => roomKey(selected) === roomKey(room))); label.append(input, node('span', room.room_name || room.room_id)); label.title = `${room.account_id} / ${room.room_id}`; return label; }));
   element('job-rooms').classList.toggle('hidden', element('job-all-rooms').checked); element('job-dialog').showModal();
+}
+function addJobHeader(savedName = '') {
+  const row = node('div', undefined, 'job-header-row'); row.dataset.savedName = savedName;
+  const nameLabel = node('label', '名称'); const name = node('input'); name.className = 'job-header-name'; name.value = savedName; name.placeholder = 'Authorization'; name.required = true; name.autocomplete = 'off'; nameLabel.append(name);
+  const valueLabel = node('label', '值'); const value = node('input'); value.className = 'job-header-value'; value.type = 'password'; value.autocomplete = 'new-password'; value.placeholder = savedName ? '已保存；留空保留' : 'Bearer …'; valueLabel.append(value);
+  name.oninput = () => { value.placeholder = savedName && name.value.toLowerCase() === savedName.toLowerCase() ? '已保存；留空保留' : '输入新值'; };
+  row.append(nameLabel, valueLabel, action('移除', () => row.remove(), 'quiet', 'job-form-error')); element('job-headers').append(row);
+}
+function updateDeliveryFields() {
+  element('job-text-field').classList.toggle('hidden', element('job-delivery-mode').value !== 'multipart');
+  const custom = element('job-success-mode').value === 'custom';
+  for (const id of ['job-status-field', 'job-response-field-label', 'job-response-value-label']) element(id).classList.toggle('hidden', !custom);
 }
 function renderMonitoring() {
   const result = state.monitoring; if (!result) return;
@@ -215,13 +238,33 @@ element('history-older').onclick = () => { state.historyBefore = state.historyOl
 element('history-latest').onclick = () => { state.historyBefore = null; loadHistory(); };
 element('history-job').onchange = () => { state.historyBefore = null; loadHistory(); };
 element('new-job').onclick = () => openJob();
+element('job-add-header').onclick = () => addJobHeader();
+element('job-delivery-mode').onchange = updateDeliveryFields;
+element('job-success-mode').onchange = updateDeliveryFields;
+element('job-dialog').addEventListener('close', () => { element('job-headers').replaceChildren(); });
 element('job-all-rooms').onchange = () => element('job-rooms').classList.toggle('hidden', element('job-all-rooms').checked);
 element('group-search-form').onsubmit = event => { event.preventDefault(); loadMonitoring(element('group-query').value.trim()); };
 element('job-form').onsubmit = async event => {
   event.preventDefault(); element('save-job').disabled = true;
   try {
     const rooms = element('job-all-rooms').checked ? [] : [...element('job-rooms').querySelectorAll('input:checked')].map(input => JSON.parse(input.value)); if (!element('job-all-rooms').checked && !rooms.length) throw new Error('请选择群聊');
-    await api('/api/jobs' + (state.editing ? '/' + state.editing : ''), { name: element('job-name').value, target_url: element('job-url').value, cron: element('job-cron').value, timezone: element('job-timezone').value, enabled: element('job-enabled').checked, start: element('job-start').value, rooms });
+    const headers = Object.create(null), names = new Set();
+    for (const row of element('job-headers').children) {
+      const name = row.querySelector('.job-header-name').value.trim(), value = row.querySelector('.job-header-value').value;
+      if (names.has(name.toLowerCase())) throw new Error('请求头名称不能重复'); names.add(name.toLowerCase());
+      headers[name] = !value && row.dataset.savedName && name.toLowerCase() === row.dataset.savedName.toLowerCase() ? null : value;
+    }
+    const success_response = { mode: element('job-success-mode').value };
+    if (success_response.mode === 'custom') {
+      const codes = element('job-status-codes').value.trim();
+      if (codes !== '2xx' && !/^2\d\d(?:\s*,\s*2\d\d)*$/.test(codes)) throw new Error('成功状态码请填写 2xx 或逗号分隔的 200–299 状态码');
+      success_response.status_codes = codes === '2xx' ? codes : codes.split(',').map(Number); success_response.response_field = element('job-response-field').value.trim();
+      if (success_response.response_field) {
+        try { success_response.response_value = JSON.parse(element('job-response-value').value); }
+        catch { throw new Error('预期值必须是 JSON；字符串请加双引号，例如 "submitted"'); }
+      }
+    }
+    await api('/api/jobs' + (state.editing ? '/' + state.editing : ''), { name: element('job-name').value, target_url: element('job-url').value, cron: element('job-cron').value, timezone: element('job-timezone').value, enabled: element('job-enabled').checked, start: element('job-start').value, rooms, headers, delivery_mode: element('job-delivery-mode').value, text: element('job-text').value || null, success_response });
     element('job-dialog').close(); toast('任务已保存'); await loadJobs();
   } catch (error) { errorAt('job-form-error', error); } finally { element('save-job').disabled = false; }
 };

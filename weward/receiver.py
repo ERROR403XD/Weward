@@ -323,6 +323,9 @@ class ReceiverHandler(Handler):
                 self.send_json(app.monitoring(values=self.read_json()))
             elif path == "/api/notifications":
                 self.send_json({"config": app.notifications.save(self.read_json())})
+            elif re.fullmatch(r"/api/batches/[0-9a-f]{32}/retry", path):
+                self.read_json()
+                self.send_json(app.relay.retry_batch(path.split("/")[3]), 202)
             elif re.fullmatch(r"/api/jobs/[0-9a-f]{32}(/enabled|/run)?", path):
                 parts = path.split("/")
                 values = self.read_json()
