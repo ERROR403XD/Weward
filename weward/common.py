@@ -8,6 +8,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+MAX_FILE_BYTES = 32 * 1024 * 1024
+
+
+def valid_filename(value):
+    return (isinstance(value, str) and bool(value) and value not in (".", "..")
+            and not any(char in '/\\' or ord(char) < 32 or ord(char) == 127 for char in value))
+
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 

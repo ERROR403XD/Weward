@@ -16,7 +16,7 @@
   <aside class="rooms-sidebar"><div class="sidebar-title">群聊 <span id="room-count"></span></div><input id="room-search" type="search" placeholder="查找群聊" aria-label="查找群聊"><div id="room-list" class="room-list"></div></aside>
   <div class="conversation">
     <header class="conversation-header"><div class="conversation-heading"><h1 id="room-title">选择群聊</h1><span id="room-summary" class="muted"></span></div><div class="paging"><button id="older" class="quiet">更早</button><button id="newer" class="quiet">较新</button><button id="latest" class="quiet">最新</button></div></header>
-    <form id="message-filters" class="message-filters"><input id="message-query" type="search" placeholder="搜索当前群" aria-label="搜索当前群"><select id="message-type" aria-label="消息类型"><option value="">全部类型</option><option value="text">文字</option><option value="image">图片</option><option value="link">链接</option><option value="reply">引用</option></select><select id="message-archived" aria-label="整理状态"><option value="0">未收起</option><option value="all">全部</option><option value="1">已收起</option></select><button type="submit" class="quiet">筛选</button></form>
+    <form id="message-filters" class="message-filters"><input id="message-query" type="search" placeholder="搜索当前群" aria-label="搜索当前群"><select id="message-type" aria-label="消息类型"><option value="">全部类型</option><option value="text">文字</option><option value="image">图片</option><option value="file">文件</option><option value="link">链接</option><option value="reply">引用</option></select><select id="message-archived" aria-label="整理状态"><option value="0">未收起</option><option value="all">全部</option><option value="1">已收起</option></select><button type="submit" class="quiet">筛选</button></form>
     <p id="messages-error" class="inline-error hidden" role="alert"></p><div id="message-list" class="message-list"><div class="empty">暂无群聊消息</div></div>
   </div>
 </section>
@@ -32,6 +32,15 @@
   <form id="group-search-form" class="group-search"><input id="group-query" type="search" placeholder="输入群名，添加监视" aria-label="搜索群名" required><button type="submit" class="primary">查找群聊</button></form>
   <p id="settings-error" class="inline-error hidden" role="alert"></p><div id="group-results" class="search-results hidden"></div>
   <div class="table-scroll"><table><thead><tr><th>群聊</th><th>状态</th><th class="actions-column">操作</th></tr></thead><tbody id="monitored-list"></tbody></table><div id="monitored-empty" class="empty hidden">暂无监视群聊</div></div>
+  <section class="notification-settings"><header class="page-header"><h2>群文件保存</h2><span id="file-settings-saved" class="muted"></span></header>
+    <p class="muted">保存监听群中微信桌面已下载的文件，投递时自动加入 ZIP。本人发送的文件同样保存。</p>
+    <form id="file-settings-form"><fieldset id="file-settings-fields" disabled><div class="form-grid">
+      <label class="check-field"><input id="files-enabled" type="checkbox">保存群文件</label>
+      <label>单个文件最大体积（MiB）<input id="files-max-size" type="number" min="0.01" max="32" step="0.01" value="20" required><small>默认 20 MiB，最多 32 MiB；1 MiB = 1,048,576 字节。</small></label>
+      <label>允许的文件后缀<input id="files-extensions" placeholder="例如 pdf, docx, xlsx, zip"><small>用逗号或空格分隔，不区分大小写；可带点，支持 tar.gz。留空保存所有后缀。</small></label>
+    </div><p class="field-hint">设置用于之后采集的消息，已保存文件和待重试包保持原样。未下载、被过滤或超限的文件会保留消息及原因；修改设置不会自动补存历史文件。体积限制不控制微信客户端自身的下载与存储。</p>
+    <button id="save-file-settings" type="submit" class="primary">保存文件设置</button></fieldset><p id="file-settings-error" class="inline-error hidden" role="alert"></p></form>
+  </section>
   <section class="notification-settings"><header class="page-header"><h2>POST 事件通知</h2><span id="notification-saved" class="muted"></span></header>
     <p class="muted">由接收端检测采集状态并独立发送通知。离线可能是微信掉线、采集异常或容器不可达；持续异常才通知，恢复后通知上线。</p>
     <form id="notification-form"><div class="form-grid">

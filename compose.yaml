@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: docker/collector.Dockerfile
       args:
-        WEBOX_IMAGE: ${WEBOX_IMAGE:-weward-webox:8ca042c-wx4.1.1.8-compat2}
+        WEBOX_IMAGE: ${WEBOX_IMAGE:-weward-webox:8ca042c-wx4.1.1.8-compat3}
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       WATCH_ROOM_REMARK: ${WATCH_ROOM_REMARK:-webox.weward}

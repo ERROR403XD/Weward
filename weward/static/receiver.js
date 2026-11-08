@@ -33,14 +33,28 @@ function messageText(message) {
   if (message.type === 'sphfeed') return '[视频号] ' + (raw.sphfeed?.feed_desc || raw.sphfeed?.sph_name || '');
   if (message.type === 'emotion') return '[表情]';
   if (message.type === 'image') return '[图片]';
+  if (message.type === 'file') return message.file?.filename || raw.file?.filename || '[文件]';
   if (message.type === 'link') return raw.link?.title || raw.link?.description || raw.link?.link_url || '[链接]';
   return raw.text?.content || raw.content || `[${message.type}]`;
 }
 function openDetail(title) { element('detail-title').textContent = title; element('detail-content').replaceChildren(); if (!element('detail-dialog').open) element('detail-dialog').showModal(); return element('detail-content'); }
 function metadata(entries) { const list = node('dl', undefined, 'detail-meta'); for (const [label, value] of entries) list.append(node('dt', label), node('dd', String(value ?? '—'))); return list; }
+function fileContent(message) {
+  const attachment = message.file, content = node('div', undefined, 'file-content');
+  if (attachment?.status === 'available') {
+    const download = node('a', '下载 · ' + messageText(message));
+    download.href = '/files/' + message.event_id; download.download = attachment.filename; content.append(download);
+    const size = attachment.size < 1024 ? attachment.size + ' B' : attachment.size < 1048576 ? (attachment.size / 1024).toFixed(1) + ' KiB' : (attachment.size / 1048576).toFixed(2) + ' MiB';
+    content.append(node('small', size, 'subtle'));
+  } else {
+    content.append(node('span', messageText(message)), node('small', attachment?.error || '旧消息仅保存了文件信息，未收到文件字节', 'subtle'));
+  }
+  return content;
+}
 function showMessage(message) {
   const content = openDetail('消息详情');
   if (message.image?.status === 'available') { const image = node('img', undefined, 'detail-image'); image.src = '/media/' + message.event_id; image.alt = '聊天图片'; content.append(image); }
+  if (message.type === 'file') content.append(fileContent(message));
   content.append(node('div', String(messageText(message)), 'detail-text'), metadata([['发送者', message.sender_name || message.sender_id], ['消息时间', time(message.message_time_ms)], ['收到时间', time(message.received_at)], ['群聊', message.room_name || message.room_id], ['投递', message.deliveries.map(delivery => `${delivery.name} · ${delivery.status === 'sent' ? '已发送' : '待回执'}`).join('；') || '未投递']]));
   const note = node('textarea', undefined, 'detail-note'); note.value = message.note; note.placeholder = '备注'; note.setAttribute('aria-label', '消息备注');
   const controls = node('div', undefined, 'dialog-footer');
@@ -57,7 +71,8 @@ function renderMessage(message) {
   if (message.type === 'image') {
     if (message.image?.status === 'available') { const image = node('img'); image.src = '/media/' + message.event_id; image.alt = '查看图片'; image.loading = 'lazy'; image.tabIndex = 0; image.onclick = () => showMessage(message); image.onkeydown = event => { if (event.key === 'Enter') showMessage(message); }; body.append(image); }
     else body.append(node('span', '[图片不可用]', 'subtle'));
-  } else if (message.type === 'link') { body.append(link(message.raw?.link?.link_url, messageText(message))); }
+  } else if (message.type === 'file') { body.append(fileContent(message)); }
+  else if (message.type === 'link') { body.append(link(message.raw?.link?.link_url, messageText(message))); }
   else { const text = richText(messageText(message)); body.append(text); if (String(messageText(message)).length > 200) { text.className = 'clamped'; const expand = action('展开', () => { text.classList.toggle('clamped'); expand.textContent = text.classList.contains('clamped') ? '展开' : '收起'; }, 'quiet expand', 'messages-error'); body.append(expand); } }
   if (message.note) { const marker = node('span', '·', 'message-note'); marker.title = message.note; sender.append(marker); }
   const more = action('⋯', () => showMessage(message), 'message-more', 'messages-error'); more.setAttribute('aria-label', '消息详情');
@@ -220,10 +235,10 @@ async function changeMonitoring(room, actionName, enabled) {
 async function showTab(tab) {
   state.tab = tab;
   for (const button of document.querySelectorAll('[data-tab]')) { const selected = button.dataset.tab === tab; button.classList.toggle('active', selected); button.setAttribute('aria-pressed', String(selected)); element(button.dataset.tab + '-panel').classList.toggle('hidden', !selected); }
-  if (tab === 'messages') await loadMessages(); else if (tab === 'jobs') await loadJobs(); else await Promise.all([loadMonitoring(), loadNotifications()]);
+  if (tab === 'messages') await loadMessages(); else if (tab === 'jobs') await loadJobs(); else await Promise.all([loadMonitoring(), loadNotifications(), loadFileSettings()]);
 }
 async function refresh() {
-  try { await loadRooms(); if (state.tab === 'messages') await loadMessages(); else if (state.tab === 'jobs') await loadJobs(); else await Promise.all([loadMonitoring(), loadNotifications()]); }
+  try { await loadRooms(); if (state.tab === 'messages') await loadMessages(); else if (state.tab === 'jobs') await loadJobs(); else await Promise.all([loadMonitoring(), loadNotifications(), loadFileSettings()]); }
   catch (error) { element('connection').textContent = '离线'; element('connection').classList.add('offline'); errorAt(state.tab === 'messages' ? 'messages-error' : state.tab === 'jobs' ? 'jobs-error' : 'settings-error', error); }
 }
 for (const button of document.querySelectorAll('[data-tab]')) button.onclick = () => showTab(button.dataset.tab);
@@ -302,4 +317,25 @@ element('notification-form').onsubmit = async event => {
   } catch (error) { errorAt('notification-error', error); } finally { element('save-notifications').disabled = false; }
 };
 element('notification-form').oninput = () => { element('notification-saved').textContent = '有未保存修改'; };
+async function loadFileSettings() {
+  if (state.fileSettingsLoaded) return;
+  try {
+    const config = await api('/api/file-settings');
+    element('files-enabled').checked = config.enabled; element('files-max-size').value = config.max_size_mb;
+    element('files-extensions').value = config.extensions.join(', ');
+    element('file-settings-fields').disabled = false; state.fileSettingsLoaded = true;
+    errorAt('file-settings-error', null);
+  } catch (error) { errorAt('file-settings-error', error); }
+}
+element('file-settings-form').onsubmit = async event => {
+  event.preventDefault(); element('save-file-settings').disabled = true;
+  try {
+    const config = await api('/api/file-settings', { enabled: element('files-enabled').checked,
+      extensions: element('files-extensions').value.split(/[,，;；\s]+/).filter(Boolean),
+      max_size_mb: Number(element('files-max-size').value) });
+    element('files-extensions').value = config.extensions.join(', ');
+    errorAt('file-settings-error', null); element('file-settings-saved').textContent = '已保存'; toast('文件设置已保存');
+  } catch (error) { errorAt('file-settings-error', error); } finally { element('save-file-settings').disabled = false; }
+};
+element('file-settings-form').oninput = () => { element('file-settings-saved').textContent = '有未保存修改'; };
 refresh(); setInterval(refresh, 5000);

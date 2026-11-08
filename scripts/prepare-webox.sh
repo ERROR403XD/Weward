@@ -40,8 +40,11 @@ mkdir -p "$project_root/.local"
 build_dir="$(mktemp -d "$project_root/.local/webox-build-XXXXXX")"
 trap 'rm -rf "$build_dir"' EXIT
 git -C "$upstream_dir" archive "$upstream_commit" | tar -x -C "$build_dir"
+# Isolate git apply from the parent project's worktree so no patch is skipped.
+git -C "$build_dir" init --quiet
 git -C "$build_dir" apply "$project_root/patches/webox/compat.patch"
 git -C "$build_dir" apply --unidiff-zero "$project_root/patches/webox/groups.patch"
+git -C "$build_dir" apply "$project_root/patches/webox/files.patch"
 cp "$project_root/patches/webox/image_key.go" "$build_dir/internal/wechatdb/weward_image_key.go"
 cp "$project_root/patches/webox/image_key_test.go" "$build_dir/internal/wechatdb/weward_image_key_test.go"
 cp "$project_root/patches/webox/media_error_test.go" "$build_dir/internal/wechatapi/weward_media_error_test.go"
@@ -50,9 +53,12 @@ cp "$project_root/patches/webox/groups_state.go" "$build_dir/internal/wechat/wew
 cp "$project_root/patches/webox/groups_api.go" "$build_dir/internal/wechatapi/weward_groups.go"
 cp "$project_root/patches/webox/groups_db_test.go" "$build_dir/internal/wechatdb/weward_groups_test.go"
 cp "$project_root/patches/webox/groups_api_test.go" "$build_dir/internal/wechatapi/weward_groups_test.go"
+cp "$project_root/patches/webox/files_api.go" "$build_dir/internal/wechatapi/weward_files.go"
+cp "$project_root/patches/webox/files_api_test.go" "$build_dir/internal/wechatapi/weward_files_test.go"
+cp "$project_root/patches/webox/files_db_test.go" "$build_dir/internal/wechatdb/weward_files_test.go"
 ln "$package_path" "$build_dir/docker/wechat/$package"
 docker build --network=host \
   --build-arg HTTP_PROXY="${HTTP_PROXY:-}" \
   --build-arg HTTPS_PROXY="${HTTPS_PROXY:-}" \
   --build-arg NO_PROXY="${NO_PROXY:-}" \
-  -t weward-webox:8ca042c-wx4.1.1.8-compat2 "$build_dir"
+  -t weward-webox:8ca042c-wx4.1.1.8-compat3 "$build_dir"

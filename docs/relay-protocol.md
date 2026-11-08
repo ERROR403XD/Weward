@@ -4,9 +4,9 @@
 
 ## 数据与管理
 
-原始消息、收到的图片、备注和整理状态保存在 `messages`。入站重复按 `event_id` 去重，首次入库序号、接收时间、图片、备注和投递状态均不被覆盖。管理操作不删除消息。查询列由原 payload 回填，旧字段保留。
+原始消息、收到的图片与文件、备注和整理状态保存在 `messages`。入站重复按 `event_id` 去重，首次入库序号、接收时间、媒体、备注和投递状态均不被覆盖。管理操作不删除消息。查询列由原 payload 回填，旧字段保留。
 
-`relay_jobs` 保存任务配置、确认游标、当前轮截止序号和下次执行时间。`relay_batches` 原子保存固定 ZIP、SHA256、消息范围、投递配置快照、HTTP 请求头、尝试次数和回执；multipart 批次额外保存完整请求正文（包含 ZIP 副本），直传复用 archive 字节。`relay_batch_messages` 记录文件包实际包含的消息。文件包和图片均在独立中转器数据库中，打包期间不读取采集端目录或调用 WeBox。
+`relay_jobs` 保存任务配置、确认游标、当前轮截止序号和下次执行时间。`relay_batches` 原子保存固定 ZIP、SHA256、消息范围、投递配置快照、HTTP 请求头、尝试次数和回执；multipart 批次额外保存完整请求正文（包含 ZIP 副本），直传复用 archive 字节。`relay_batch_messages` 记录文件包实际包含的消息。文件包、图片和群文件均在独立中转器数据库中，打包期间不读取采集端目录或调用 WeBox。
 
 新任务默认暂停，必须明确设置接收地址并启用。每个任务一个独立游标，可选择所有群或具体 `{account_id, room_id}`。同一个消息可投递给多个任务，其“已发送”状态分别计算。消息查询 API 未指定任务时，“已发送”表示至少一个任务已获回执；指定任务后仅计算该任务。选择“仅新记录”时，创建前记录不会显示为该任务待发送。
 
@@ -22,11 +22,28 @@ receiver 通过 `COLLECTOR_CONTROL_URL`（默认 `http://collector:8081`）代�
 - 暂停、移除保留消息与游标；恢复从原进度续采，首次新增使用原有回溯配置。全部暂停时进入 `idle`。配置修改最迟在当前长轮询结束后生效。
 - WeBox compat2 的群搜索接口读取群联系人，getupdates 的 `room_ids` 显式选择群。collector 提交消息与游标时，在同一事务内核对监听版本；轮询期间配置变化则丢弃旧结果，按新配置重新读取。
 
+## 群文件采集
+
+collector 持久配置的 `files` 字段为 `{"enabled":true,"extensions":[],"max_size_mb":20}`。默认启用、全部后缀、20 MiB；最大允许 32 MiB，使单文件 Base64 加元数据可容纳于既有 64 MiB 入站上限。后缀保存为小写且不含前导点，支持 `tar.gz` 等复合后缀；空数组包含无后缀文件。该配置适用于所有监听群，不按投递任务分别配置。
+
+collector 和 receiver 均提供 `GET/POST /api/file-settings`；receiver 仅代理 collector 控制接口。POST 提交完整文件配置，省略字段取默认值。此接口独立于群搜索，不依赖微信已登录。旧版采集 `/api/config` 不携带 `files` 时保留已有文件设置，避免旧页面保存目标地址时重置文件规则。
+
+新 collector 在 getupdates 中传 `file_policy: {enabled, extensions, max_bytes}`，需要 WeBox compat3。WeBox 在文件复制到 shared 前核对规则和实际大小；采集器再在当前群目录内有限读取并保存 Base64 快照。文件读取失败沿用以消息时间为起点的约一分钟等待，超时给出不可用原因并放行后续消息。规则明确拒绝的文件不等待。游标、文件/图片快照和 outbox 同事务保存，并在事务内核对监听版本及采集配置；后续修改配置不影响原快照。
+
+入站 `schema_version=1` 的文件消息新增顶层 `file` 对象：
+
+- 可用：`{"status":"available","filename":"报告.pdf","content_type":"application/octet-stream","size":123,"sha256":"...","base64":"..."}`。receiver 校验安全文件名、大小、Base64、SHA256，将字节存入 `messages.file_data`，payload 去掉 Base64 并记录 `/files/<event_id>` 下载地址。允许大小为 0 的空文件。
+- 跳过：`status="skipped"`，保留 filename、error 和 reason（disabled、extension、size），没有文件字节。
+- 不可用：`status="unavailable"`，保留 filename 和 error，没有文件字节。
+- 旧版只有 `raw.file`、没有顶层 `file` 的消息仍可读取和投递，不补造文件。迁移增加 BLOB 列并回填文件名搜索索引，已有身份、序号、首次接收时间、批次和游标不变。
+
+文件下载使用 `application/octet-stream` 和 attachment Content-Disposition，中文名使用 UTF-8 filename*。保存设置不影响微信客户端自己的下载或原文件存储，也不删除已有文件；修改后不会自动补采过去的文件。
+
 ## 增量与批次边界
 
 1. 定时触发或点击立即发送时，固定数据库当前最大入库序号为本轮截止值。
 2. 选取 `(上次已确认游标, 本轮截止值]` 内符合群范围的消息，按入库序号升序打包。
-3. 每包最多 500 条，图片字节总量目标上限 32 MiB；超限单图允许单独成包。此限制不是整个 ZIP 或 JSON 的硬大小限制。
+3. 每包最多 500 条，图片与群文件的字节合计目标上限 32 MiB；超限单条允许单独成包。此限制不是整个 ZIP 或 JSON 的硬大小限制。
 4. 创建包、保存字节及成员关系在同一 SQLite 事务内完成。之后接收的新消息不改变该包。
 5. 回执验证成功后，以一个事务保存回执、标记该包已发送、推进游标。本轮分包会持续发送直到固定截止值，不需等待下一次 cron。
 6. 未选中的群不进入包。空范围不生成包，也不推进已确认游标。后续入库的迟到消息仍可进入下一轮，即使其微信时间更早。
@@ -41,9 +58,12 @@ receiver 通过 `COLLECTOR_CONTROL_URL`（默认 `http://collector:8081`）代�
 messages.json
 images/<event_id>.png
 images/<event_id>.jpg
+files/<event_id>/<原文件名>
 ```
 
 图片按收到的 MIME 类型使用 png/jpg/gif/webp/bmp 后缀，文件名来自 event_id。图片完整字节来自中转器数据库，生成包时复核 SHA256；可用图片如果丢失或损坏，整个批次整理失败，并在任务页显示错误，不标记已发送。
+
+可用群文件以 `files/<event_id>/<原文件名>` 存放，同名文件按事件隔离。对应消息含 `file: {"status":"available","filename":"报告.pdf","content_type":"application/octet-stream","size":123,"sha256":"...","path":"files/<event_id>/报告.pdf"}`；打包前复核大小和 SHA256，文件缺失或损坏时整个批次失败、不推进游标。空文件仍产生真实 ZIP 条目。跳过/不可用状态随 JSON 保留，不产生文件条目。输出 file 不含接收端 url 或 Base64。原有 ZIP schema_version 保持 1，新增字段向后兼容；接收方需读取 file.path 才能使用新增附件。
 
 JSON 的 UTF-8 示例（标识为示意值）：
 
@@ -161,7 +181,9 @@ HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时�
 
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/status` | 收到、收起、已有回执的消息计数及图片字节 |
+| `GET /api/status` | 收到、收起、已有回执的消息计数及 image_bytes、file_bytes |
+| `GET/POST /api/file-settings` | 代理查询/保存 collector 文件开关、后缀及单文件最大体积 |
+| `GET /files/<event_id>` | 下载接收端实际收到的文件，未收到字节返回 404 |
 | `GET /api/rooms` | 按账号/群聚合的群列表与最新名称 |
 | `GET /api/messages` | 消息和逐任务投递状态；支持 before、limit（1–100）、account_id、room_id、type、q、archived（all/0/1）、job_id、state（all/pending/sent） |
 | `POST /api/messages/<event_id>/manage` | `{ "note": "备注", "archived": true }`，两字段均可单独更新 |
@@ -206,7 +228,7 @@ HTTP 超时为 30 秒，失败按 2、4、8…秒指数退避，最多 1 小时�
 
 ## 运行、存储与验证
 
-无第三方 Python 包；容器的系统时区数据供 `zoneinfo` 使用。默认保留消息、原图片、ZIP 和回执，多任务会各自保存包，磁盘使用会持续增长。当前不提供自动删除或保留期，以保留可重试原件和回执关联。
+无第三方 Python 包；容器的系统时区数据供 `zoneinfo` 使用。默认保留消息、原图片、群文件、ZIP 和回执，多任务会各自保存包，磁盘使用会持续增长。当前不提供自动删除或保留期，以保留可重试原件和回执关联。
 
 升级自动追加投递配置和请求快照列；旧任务、已完成回执和待重试 ZIP 保留原身份、字节及游标。旧待重试批次第一次尝试时持久保存默认 HTTP 请求头。回退应暂停任务、等请求结束并恢复旧版程序及升级前数据库备份；旧版程序不认识新增投递配置，不能直接处理含新配置的数据库。外部已接收的数据无法通过本地回退撤回。
 

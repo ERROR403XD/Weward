@@ -71,8 +71,8 @@ class MonitoringTest(unittest.TestCase):
         self.collector.configure_monitoring(values)
         self.fake.messages = [message("racing", room="new@chatroom")]
         poll = self.collector.poll_updates
-        def changed(cursor, room_ids=None):
-            result = poll(cursor, room_ids)
+        def changed(cursor, room_ids=None, file_config=None):
+            result = poll(cursor, room_ids, file_config)
             self.collector.configure_monitoring({**values, "action": "set", "enabled": False})
             return result
         with patch.object(self.collector, "poll_updates", side_effect=changed):

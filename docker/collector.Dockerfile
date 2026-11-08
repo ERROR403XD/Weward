@@ -1,4 +1,4 @@
-ARG WEBOX_IMAGE=weward-webox:8ca042c-wx4.1.1.8-compat2
+ARG WEBOX_IMAGE=weward-webox:8ca042c-wx4.1.1.8-compat3
 FROM ${WEBOX_IMAGE}
 WORKDIR /app
 RUN python3 -c "import sqlite3, urllib.request, http.server"

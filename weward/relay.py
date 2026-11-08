@@ -12,7 +12,7 @@ import urllib.request
 import uuid
 import zipfile
 
-from .common import database, encode_json, init_database, utc_now
+from .common import database, encode_json, init_database, utc_now, valid_filename
 from .delivery import load_config, normalize_config, public_config, redact, request_payload, validate_response
 from .schedule import Cron
 
@@ -48,7 +48,7 @@ def message_text(event):
     parts = []
     for section, keys in (("text", ("content",)), ("reply", ("title",)),
                           ("link", ("title", "description", "link_url")),
-                          ("sphfeed", ("sph_name", "feed_desc"))):
+                          ("sphfeed", ("sph_name", "feed_desc")), ("file", ("filename",))):
         content = raw.get(section)
         if isinstance(content, dict):
             parts.extend(content[key] for key in keys if isinstance(content.get(key), str) and content[key])
@@ -97,7 +97,7 @@ class Relay:
         self.notifications = notifications
         self.stop = threading.Event()
         self.max_messages = 500
-        self.max_image_bytes = 32 * 1024 * 1024
+        self.max_media_bytes = 32 * 1024 * 1024
         init_database(db_path, SCHEMA)
         with database(db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -268,6 +268,17 @@ class Relay:
                         image["path"] = f"images/{event['event_id']}.{EXTENSIONS[row['content_type']]}"
                         archive.writestr(image["path"], row["image"])
                     message["image"] = image
+                if event.get("file"):
+                    attachment = {key: value for key, value in event["file"].items() if key not in ("url", "base64", "path")}
+                    if attachment["status"] == "available":
+                        content = row["file_data"]
+                        if (content is None or len(content) != attachment["size"]
+                                or hashlib.sha256(content).hexdigest() != attachment["sha256"]
+                                or not valid_filename(attachment["filename"])):
+                            raise ValueError(f"文件缺失或损坏：{event['event_id']}")
+                        attachment["path"] = f"files/{event['event_id']}/{attachment['filename']}"
+                        archive.writestr(attachment["path"], content)
+                    message["file"] = attachment
                 messages.append(message)
             document = {"schema_version": 1, "batch_id": batch_id, "job_id": job["job_id"], "created_at": created_at,
                         "range": {"after_sequence": job["cursor"], "through_sequence": cutoff},
@@ -285,7 +296,8 @@ class Relay:
             if pending:
                 return pending["batch_id"]
             clause, parameters = room_condition(json.loads(job["rooms"]))
-            candidates = connection.execute(f"""SELECT sequence, COALESCE(LENGTH(image),0) AS image_size FROM messages
+            candidates = connection.execute(f"""SELECT sequence,
+                COALESCE(LENGTH(image),0) + COALESCE(LENGTH(file_data),0) AS media_size FROM messages
                 WHERE sequence>? AND sequence<=? AND {clause} ORDER BY sequence LIMIT ?""",
                 (job["cursor"], job["run_until"], *parameters, self.max_messages + 1)).fetchall()
             if not candidates:
@@ -293,10 +305,10 @@ class Relay:
                 return None
             selected, size = [], 0
             for candidate in candidates:
-                if selected and (len(selected) >= self.max_messages or size + candidate["image_size"] > self.max_image_bytes):
+                if selected and (len(selected) >= self.max_messages or size + candidate["media_size"] > self.max_media_bytes):
                     break
                 selected.append(candidate["sequence"])
-                size += candidate["image_size"]
+                size += candidate["media_size"]
             cutoff = job["run_until"] if len(selected) == len(candidates) else selected[-1]
             rows = connection.execute(f"SELECT * FROM messages WHERE sequence IN ({','.join('?' for _ in selected)}) ORDER BY sequence", selected).fetchall()
             batch_id, created_at = uuid.uuid4().hex, utc_now()

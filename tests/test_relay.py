@@ -202,7 +202,7 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.relay.job(job["job_id"])["cursor"], 6)
 
     def test_image_size_budget_splits_without_losing_large_single_message(self):
-        self.relay.max_image_bytes = len(PNG) - 1
+        self.relay.max_media_bytes = len(PNG) - 1
         for identifier in ("image-one", "image-two"):
             self.receiver.receive(image_event(identifier))
         job = self.job()

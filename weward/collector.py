@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import random
+import re
 import signal
+import stat
 import threading
 import time
 import urllib.parse
@@ -12,7 +14,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .common import Handler, database, encode_json, init_database, make_server, request_json, utc_now
+from .common import MAX_FILE_BYTES, Handler, database, encode_json, init_database, make_server, request_json, utc_now, valid_filename
 
 
 SCHEMA = """
@@ -45,7 +47,78 @@ def validate_config(config):
     parsed = urllib.parse.urlsplit(target)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.fragment:
         raise ValueError("转发目标必须是完整的 HTTP(S) 地址，不能含片段")
-    return {"room_remark": remark, "target_url": target}
+    return {"room_remark": remark, "target_url": target, "files": validate_file_config(config.get("files", {}))}
+
+
+def validate_file_config(value):
+    if not isinstance(value, dict):
+        raise ValueError("文件保存配置必须是对象")
+    enabled = value.get("enabled", True)
+    extensions = value.get("extensions", [])
+    max_size_mb = value.get("max_size_mb", 20)
+    if not isinstance(enabled, bool):
+        raise ValueError("文件保存开关必须是布尔值")
+    if (isinstance(max_size_mb, bool) or not isinstance(max_size_mb, (int, float))
+            or not 0 < max_size_mb <= MAX_FILE_BYTES / (1024 * 1024)
+            or int(max_size_mb * 1024 * 1024) < 1):
+        raise ValueError("单个文件最大体积必须大于 0 且不超过 32 MiB")
+    if not isinstance(extensions, list) or len(extensions) > 100:
+        raise ValueError("文件后缀必须是最多 100 项的数组，空数组表示全部")
+    normalized = []
+    for extension in extensions:
+        if not isinstance(extension, str):
+            raise ValueError("文件后缀必须是字符串")
+        extension = extension.strip().lower().removeprefix(".")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*", extension) or len(extension) > 40:
+            raise ValueError("文件后缀请填写 pdf、docx、tar.gz 等，不含通配符或路径")
+        if extension not in normalized:
+            normalized.append(extension)
+    return {"enabled": enabled, "extensions": normalized, "max_size_mb": max_size_mb}
+
+
+def file_snapshot(message, shared_root, config):
+    source = message.get("file") or {}
+    if not isinstance(source, dict):
+        return {"status": "unavailable", "filename": "", "error": "WeBox 文件信息无效"}
+    filename = source.get("filename", "")
+    result = {"filename": filename, "status": "unavailable"}
+    try:
+        if not valid_filename(filename):
+            raise ValueError("WeBox 文件名无效")
+        if not config["enabled"]:
+            return {**result, "status": "skipped", "reason": "disabled", "error": "未启用群文件保存"}
+        if config["extensions"] and not any(filename.lower().endswith("." + ext) for ext in config["extensions"]):
+            return {**result, "status": "skipped", "reason": "extension", "error": "文件后缀不在保存范围"}
+        limit = int(config["max_size_mb"] * 1024 * 1024)
+        declared_size = source.get("filesize", 0)
+        if (isinstance(declared_size, (int, float)) and declared_size > limit) or source.get("skip_reason") == "size":
+            return {**result, "status": "skipped", "reason": "size", "error": "文件超过单个文件体积上限"}
+        sdkfileid = source.get("sdkfileid")
+        if not isinstance(sdkfileid, str) or not sdkfileid:
+            raise ValueError(source.get("error") or "WeBox 未提供文件；请确认微信桌面已下载，等待窗口约 1 分钟")
+        rooms_root = (Path(shared_root) / "rooms").resolve()
+        room_root = (rooms_root / message["roomid"]).resolve()
+        file_path = (room_root / sdkfileid).resolve()
+        if room_root.parent != rooms_root or not file_path.is_relative_to(room_root):
+            raise ValueError("WeBox 文件路径超出当前群目录")
+        if not file_path.is_file():
+            raise ValueError("WeBox 文件不存在或不是普通文件")
+        with file_path.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("WeBox 文件不是普通文件")
+            if info.st_size > limit:
+                return {**result, "status": "skipped", "reason": "size", "error": "文件超过单个文件体积上限"}
+            content = stream.read(limit + 1)
+        if len(content) > limit:
+            return {**result, "status": "skipped", "reason": "size", "error": "文件超过单个文件体积上限"}
+        if isinstance(declared_size, int) and declared_size > 0 and len(content) != declared_size:
+            raise ValueError("文件大小与 WeBox 消息不一致，可能尚未下载完整")
+        return {**result, "status": "available", "content_type": "application/octet-stream",
+                "sha256": hashlib.sha256(content).hexdigest(), "size": len(content),
+                "base64": base64.b64encode(content).decode("ascii")}
+    except (OSError, ValueError) as error:
+        return {**result, "error": str(error)}
 
 
 def image_type(content):
@@ -62,7 +135,7 @@ def image_type(content):
     raise ValueError("图片格式无法识别，可能尚未解密或文件不完整")
 
 
-def normalize_message(message, account, room, shared_root):
+def normalize_message(message, account, room, shared_root, file_config=None):
     for field in ("msgid", "from", "roomid", "msgtype"):
         if not isinstance(message.get(field), str) or not message[field]:
             raise ValueError(f"WeBox 消息缺少 {field}，保留游标等待修复")
@@ -112,6 +185,8 @@ def normalize_message(message, account, room, shared_root):
         except (OSError, ValueError) as error:
             event["image"] = {"status": "unavailable", "error": str(error)}
             logging.warning("image_unavailable event=%s error=%s", event_id, error)
+    if message["msgtype"] == "file":
+        event["file"] = file_snapshot(message, shared_root, file_config or validate_file_config({}))
     return event
 
 
@@ -133,14 +208,21 @@ class Collector:
 
     def config(self):
         with database(self.db_path) as connection:
-            return json.loads(connection.execute("SELECT value FROM settings WHERE key='config'").fetchone()[0])
+            return validate_config(json.loads(connection.execute("SELECT value FROM settings WHERE key='config'").fetchone()[0]))
 
     def configure(self, value):
-        config = validate_config(value)
         with database(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = json.loads(connection.execute("SELECT value FROM settings WHERE key='config'").fetchone()[0])
+            config = validate_config({**current, **value})
             connection.execute("UPDATE settings SET value=? WHERE key='config'", (encode_json(config).decode(),))
         self.set_runtime(ready=False, phase="configuring", last_error=None)
         return config
+
+    def file_config(self, value=None):
+        if value is None:
+            return self.config()["files"]
+        return self.configure({"files": validate_file_config(value)})["files"]
 
     def set_runtime(self, **values):
         with self.lock:
@@ -275,18 +357,22 @@ class Collector:
         self.set_runtime(account={key: account[key] for key in ("account_id", "nickname") if key in account},
                          room=contacts[0], rooms=contacts, cursors=cursors)
         with ThreadPoolExecutor(max_workers=min(len(batches), 4)) as executor:
-            responses = list(executor.map(lambda cursor: self.poll_updates(cursor, batches[cursor] if revision is not None else None), batches))
+            responses = list(executor.map(lambda cursor: self.poll_updates(
+                cursor, batches[cursor] if revision is not None else None, config["files"]), batches))
         if self.config() != config:
             return
         events, next_cursors = [], {}
         for room_ids, (new_cursor, messages) in zip(batches.values(), responses):
-            events.extend(normalize_message(message, account, rooms[message["roomid"]], self.shared_root)
+            events.extend(normalize_message(message, account, rooms[message["roomid"]], self.shared_root, config["files"])
                           for message in messages if message.get("roomid") in room_ids)
             next_cursors.update({room_id: new_cursor for room_id in room_ids})
         inserted = 0
         with database(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             if self.watch_state(account["account_id"], connection) != revision:
+                return
+            current = validate_config(json.loads(connection.execute("SELECT value FROM settings WHERE key='config'").fetchone()[0]))
+            if current != config:
                 return
             for event in events:
                 inserted += connection.execute("""INSERT OR IGNORE INTO outbox
@@ -299,8 +385,12 @@ class Collector:
         self.set_runtime(ready=True, phase="listening", last_error=None, last_poll_at=utc_now(),
                          cursor=min(next_cursors.values(), key=int), cursors=next_cursors)
 
-    def poll_updates(self, cursor, room_ids=None):
-        response = self.webox("/ilink/bot/getupdates", {"cursor": cursor, **({"room_ids": room_ids} if room_ids is not None else {})})
+    def poll_updates(self, cursor, room_ids=None, file_config=None):
+        config = file_config or self.config()["files"]
+        response = self.webox("/ilink/bot/getupdates", {"cursor": cursor,
+            "file_policy": {"enabled": config["enabled"], "extensions": config["extensions"],
+                            "max_bytes": int(config["max_size_mb"] * 1024 * 1024)},
+            **({"room_ids": room_ids} if room_ids is not None else {})})
         new_cursor = response.get("cursor")
         if not isinstance(new_cursor, str) or not new_cursor.isdecimal() or int(new_cursor) < int(cursor):
             raise ValueError("WeBox 返回无效或倒退的游标")
@@ -384,6 +474,8 @@ class CollectorHandler(Handler):
             self.send_json({"ok": True, "ready": self.server.app.status()["ready"]})
         elif self.path == "/api/status":
             self.send_json(self.server.app.status())
+        elif self.path == "/api/file-settings":
+            self.send_json(self.server.app.file_config())
         else:
             self.send_json({"error": "not found"}, 404)
 
@@ -391,6 +483,8 @@ class CollectorHandler(Handler):
         try:
             if self.path == "/api/config":
                 self.send_json(self.server.app.configure(self.read_json()))
+            elif self.path == "/api/file-settings":
+                self.send_json(self.server.app.file_config(self.read_json()))
             elif self.path == "/api/retry":
                 self.send_json({"pending": self.server.app.retry_pending()})
             elif self.path == "/api/monitoring":

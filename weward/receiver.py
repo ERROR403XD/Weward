@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.error
 from pathlib import Path
 
-from .common import Handler, database, encode_json, init_database, make_server, request_json, utc_now
+from .common import MAX_FILE_BYTES, Handler, database, encode_json, init_database, make_server, request_json, utc_now, valid_filename
 from .relay import Relay, message_text, room_condition
 from .notifications import Notifications, EVENTS, FIELDS
 
@@ -34,11 +34,15 @@ class Receiver:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(messages)")}
             additions = {"account_id": "TEXT", "room_id": "TEXT", "room_name": "TEXT", "room_remark": "TEXT",
                          "message_type": "TEXT", "message_time_ms": "INTEGER", "search_text": "TEXT",
-                         "note": "TEXT NOT NULL DEFAULT ''", "archived": "INTEGER NOT NULL DEFAULT 0"}
+                         "note": "TEXT NOT NULL DEFAULT ''", "archived": "INTEGER NOT NULL DEFAULT 0",
+                         "file_data": "BLOB"}
             for name, definition in additions.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
-            for row in connection.execute("SELECT sequence, payload FROM messages WHERE account_id IS NULL").fetchall():
+            backfill = "account_id IS NULL"
+            if "file_data" not in columns:
+                backfill += " OR message_type='file'"
+            for row in connection.execute(f"SELECT sequence, payload FROM messages WHERE {backfill}").fetchall():
                 event = json.loads(row["payload"])
                 connection.execute("""UPDATE messages SET account_id=?, room_id=?, room_name=?, room_remark=?,
                     message_type=?, message_time_ms=?, search_text=? WHERE sequence=?""", (*self.metadata(event), row["sequence"]))
@@ -50,9 +54,13 @@ class Receiver:
         self.relay = Relay(self.db_path, self.notifications)
 
     def monitoring(self, query=None, values=None):
-        url = self.collector_url.rstrip("/") + "/api/monitoring"
+        path = "/api/monitoring"
         if query is not None:
-            url += "?" + urllib.parse.urlencode({"query": query})
+            path += "?" + urllib.parse.urlencode({"query": query})
+        return self.collector_control(path, values)
+
+    def collector_control(self, path, values=None):
+        url = self.collector_url.rstrip("/") + path
         try:
             return request_json(url, values, timeout=10)
         except urllib.error.HTTPError as error:
@@ -104,16 +112,41 @@ class Receiver:
                 image["url"] = "/media/" + event["event_id"]
             elif image.get("status") != "unavailable" or not image.get("error"):
                 raise ValueError("无效的图片状态")
-        stored = {key: value for key, value in event.items() if key != "image"}
+        file_data = None
+        attachment = event.get("file")
+        if attachment is not None:
+            if event["type"] != "file" or not isinstance(attachment, dict):
+                raise ValueError("file 必须是文件消息的对象")
+            if attachment.get("status") == "available":
+                if not valid_filename(attachment.get("filename")):
+                    raise ValueError("文件名无效")
+                size = attachment.get("size")
+                if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
+                    raise ValueError("文件大小必须在 0 至 32 MiB 之间")
+                encoded = attachment.get("base64")
+                if not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_FILE_BYTES + 2) // 3):
+                    raise ValueError("文件 Base64 数据无效或超过上限")
+                file_data = base64.b64decode(encoded, validate=True)
+                if len(file_data) != size or hashlib.sha256(file_data).hexdigest() != attachment.get("sha256"):
+                    raise ValueError("文件哈希或大小不一致")
+                attachment = {key: value for key, value in attachment.items() if key not in ("base64", "url", "path")}
+                attachment.update(content_type="application/octet-stream", url="/files/" + event["event_id"])
+            elif attachment.get("status") not in ("unavailable", "skipped") or not isinstance(attachment.get("error"), str) or not attachment["error"]:
+                raise ValueError("无效的文件状态")
+            else:
+                attachment = {key: value for key, value in attachment.items() if key not in ("base64", "url", "path")}
+        stored = {key: value for key, value in event.items() if key not in ("image", "file")}
         if image:
             stored["image"] = image
+        if attachment:
+            stored["file"] = attachment
         received_at = utc_now()
         with database(self.db_path) as connection:
             inserted = connection.execute("""INSERT OR IGNORE INTO messages
-                (event_id, received_at, payload, image, content_type, delivery_attempt,
+                (event_id, received_at, payload, image, content_type, delivery_attempt, file_data,
                  account_id, room_id, room_name, room_remark, message_type, message_time_ms, search_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (event["event_id"], received_at, encode_json(stored).decode(), image_data, content_type, attempt,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event["event_id"], received_at, encode_json(stored).decode(), image_data, content_type, attempt, file_data,
                  *self.metadata(stored))).rowcount
             row = connection.execute("SELECT sequence, received_at FROM messages WHERE event_id=?", (event["event_id"],)).fetchone()
         logging.info("http_received event=%s duplicate=%s attempt=%s", event["event_id"], not inserted, attempt)
@@ -206,7 +239,8 @@ class Receiver:
     def status(self):
         with database(self.db_path) as connection:
             counts = dict(connection.execute("""SELECT COUNT(*) AS messages, COALESCE(SUM(archived),0) AS archived,
-                COALESCE(SUM(LENGTH(image)),0) AS image_bytes, MAX(received_at) AS last_received_at FROM messages""").fetchone())
+                COALESCE(SUM(LENGTH(image)),0) AS image_bytes, COALESCE(SUM(LENGTH(file_data)),0) AS file_bytes,
+                MAX(received_at) AS last_received_at FROM messages""").fetchone())
             counts["sent_messages"] = connection.execute("""SELECT COUNT(DISTINCT members.sequence) FROM relay_batch_messages members
                 JOIN relay_batches batches ON batches.batch_id=members.batch_id WHERE batches.status='sent'""").fetchone()[0]
         return {"ok": True, **counts}
@@ -267,6 +301,8 @@ class ReceiverHandler(Handler):
             self.send_json({"jobs": app.relay.jobs()})
         elif parsed.path == "/api/monitoring":
             self.send_json(app.monitoring(query.get("query")))
+        elif parsed.path == "/api/file-settings":
+            self.send_json(app.collector_control("/api/file-settings"))
         elif parsed.path == "/api/notifications":
             self.send_json({"config": app.notifications.config(), "events": EVENTS,
                             "placeholders": sorted(FIELDS), "history": app.notifications.history()})
@@ -301,6 +337,24 @@ class ReceiverHandler(Handler):
                 self.send_bytes(row["image"], row["content_type"])
             else:
                 self.send_json({"error": "接收端未收到此图片字节"}, 404)
+        elif re.fullmatch(r"/files/[0-9a-f]{64}", parsed.path):
+            with database(app.db_path) as connection:
+                row = connection.execute("SELECT file_data, payload FROM messages WHERE event_id=?", (parsed.path.split("/")[-1],)).fetchone()
+            if row is None or row["file_data"] is None:
+                self.send_json({"error": "接收端未收到此文件字节"}, 404)
+                return
+            filename = json.loads(row["payload"])["file"]["filename"]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(row["file_data"])))
+            self.send_header("Content-Disposition", "attachment; filename=\"download\"; filename*=UTF-8''" + urllib.parse.quote(filename, safe=""))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(row["file_data"])
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         else:
             self.send_json({"error": "not found"}, 404)
 
@@ -321,6 +375,8 @@ class ReceiverHandler(Handler):
                 self.send_json(app.relay.save_job(self.read_json()), 201)
             elif path == "/api/monitoring":
                 self.send_json(app.monitoring(values=self.read_json()))
+            elif path == "/api/file-settings":
+                self.send_json(app.collector_control("/api/file-settings", self.read_json()))
             elif path == "/api/notifications":
                 self.send_json({"config": app.notifications.save(self.read_json())})
             elif re.fullmatch(r"/api/batches/[0-9a-f]{32}/retry", path):

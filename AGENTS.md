@@ -12,6 +12,7 @@
 - Python 仅使用标准库，验证入口为 `python3 -m unittest discover -s tests -v`。
 - 消息展示按 message_time_ms、sequence 倒序分页；投递游标仍以入库 sequence 推进。
 - POST 事件通知在 receiver 独立持久排队，与投递结果在同一事务保存；通知网络失败不能阻塞投递或推进游标。
+- 群文件仅保存微信已下载的本地字节；collector 持久管理后缀和单文件体积规则，WeBox compat3 在 shared 复制前过滤。receiver 独立保存实际 POST 的文件字节，ZIP 使用 files/<event_id>/<原文件名>；跳过或不可用保留原因，不补造历史附件。图片与文件共同计入批次媒体体积。
 - NFS 优先用于微信媒体和 WeBox shared；Weward SQLite 与微信数据库留本地。存储迁移需停采并保留文件所有权，不自动迁移现有数据。
 - WeBox 源码固定版本和准备步骤见 README。vendor、data、.env、.local、AGENTS.local.md 均为本机文件，不纳入源码交付。
 - WeBox 兼容修改维护在 patches/webox，仅在临时构建目录应用，保持 vendor/webox 原始检出不变。图片密钥缓存属于登录数据，不提交或写入日志。
