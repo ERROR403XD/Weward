@@ -240,7 +240,9 @@ class ReceiverHandler(Handler):
         parsed = urllib.parse.urlsplit(self.path)
         query = {key: values[0] for key, values in urllib.parse.parse_qs(parsed.query).items()}
         app = self.server.app
-        if parsed.path == "/":
+        if self.serve_brand_asset(parsed.path):
+            return
+        elif parsed.path == "/":
             self.static("receiver.html")
         elif parsed.path == "/desktop":
             target = self.desktop_url()

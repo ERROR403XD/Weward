@@ -1,8 +1,16 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Weward</title><link rel="stylesheet" href="/receiver.css"><script src="/receiver.js" defer></script></head>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#16745f">
+<title>Weward</title>
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="stylesheet" href="/receiver.css"><script src="/receiver.js" defer></script>
+</head>
 <body>
-<header class="app-header"><a href="/" class="brand">Weward<span>群聊中转</span></a><nav aria-label="主导航"><button data-tab="messages" class="active" aria-pressed="true">消息</button><button data-tab="jobs" aria-pressed="false">投递任务</button><button data-tab="settings" aria-pressed="false">配置</button></nav><div class="header-tools"><span id="connection" class="connection">连接中</span><a id="wechat-desktop" class="desktop-link" href="/desktop" target="_blank" rel="noopener noreferrer" aria-label="微信扫码（在新标签页打开）" title="按需打开微信桌面，扫码完成后关闭标签页即可断开">微信扫码 <span aria-hidden="true">↗</span></a></div></header>
+<header class="app-header"><a href="/" class="brand" aria-label="Weward 群聊中转"><img class="brand-icon" src="/icons/weward.svg" width="28" height="28" alt=""><strong class="brand-name">Weward</strong><span>群聊中转</span></a><nav aria-label="主导航"><button data-tab="messages" class="active" aria-pressed="true">消息</button><button data-tab="jobs" aria-pressed="false">投递任务</button><button data-tab="settings" aria-pressed="false">配置</button></nav><div class="header-tools"><span id="connection" class="connection">连接中</span><a id="wechat-desktop" class="desktop-link" href="/desktop" target="_blank" rel="noopener noreferrer" aria-label="微信扫码（在新标签页打开）" title="按需打开微信桌面，扫码完成后关闭标签页即可断开">微信扫码 <span aria-hidden="true">↗</span></a></div></header>
 <main>
 <section id="messages-panel" class="workspace">
   <aside class="rooms-sidebar"><div class="sidebar-title">群聊 <span id="room-count"></span></div><input id="room-search" type="search" placeholder="查找群聊" aria-label="查找群聊"><div id="room-list" class="room-list"></div></aside>

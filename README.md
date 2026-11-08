@@ -1,4 +1,4 @@
-# Weward
+# <img src="weward/static/icons/weward.svg" width="36" height="36" alt=""> Weward
 
 微信群消息采集与中转项目，采集端基于 [netcat-ai/webox](https://github.com/netcat-ai/webox/tree/8ca042cd79221d05f6a74cb48064c7ba14220dc9) 的真实 Linux 微信客户端。包含采集转发端和消息中转器两个独立服务，无大模型和自动回复。
 

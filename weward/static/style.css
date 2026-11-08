@@ -4,6 +4,9 @@ body { margin: 0; }
 main { width: min(100% - 40px, 1060px); margin: 40px auto 70px; }
 header { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 28px; flex-wrap: wrap; }
 h1 { font-size: 28px; margin: 6px 0 10px; letter-spacing: -.6px; }
+.collector-brand { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.collector-brand img { flex-shrink: 0; }
+.collector-brand h1 { margin-bottom: 0; }
 h2 { font-size: 18px; margin: 0 0 16px; }
 p { line-height: 1.7; }
 .eyebrow { color: #177b65; font-size: 12px; font-weight: 700; letter-spacing: 2px; }

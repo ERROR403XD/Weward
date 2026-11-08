@@ -79,8 +79,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, filename):
         content = (Path(__file__).parent / "static" / filename).read_bytes()
-        content_type = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}[Path(filename).suffix] + "; charset=utf-8"
+        content_type = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+            ".svg": "image/svg+xml; charset=utf-8",
+            ".png": "image/png",
+            ".ico": "image/vnd.microsoft.icon",
+            ".webmanifest": "application/manifest+json; charset=utf-8",
+        }[Path(filename).suffix]
         self.send_bytes(content, content_type)
+
+    def serve_brand_asset(self, path):
+        if path not in {
+            "/favicon.svg", "/favicon.ico", "/apple-touch-icon.png", "/site.webmanifest",
+            "/icons/weward.svg", "/icons/icon-192.png", "/icons/icon-512.png",
+            "/icons/icon-maskable-512.png",
+        }:
+            return False
+        self.static(path.removeprefix("/"))
+        return True
 
 
 def make_server(address, handler, app):

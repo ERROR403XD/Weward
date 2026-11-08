@@ -366,7 +366,9 @@ class Collector:
 class CollectorHandler(Handler):
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path == "/api/monitoring":
+        if self.serve_brand_asset(parsed.path):
+            return
+        elif parsed.path == "/api/monitoring":
             try:
                 query = urllib.parse.parse_qs(parsed.query)
                 self.send_json(self.server.app.monitoring(query.get("query", [None])[0]))

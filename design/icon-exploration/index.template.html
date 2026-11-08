@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Weward · 图标选型</title>
+  <link id="page-favicon" rel="icon" href="icons/01-forward-w.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="gallery.css">
+  <script id="concept-data" type="application/json">/* CONCEPT_DATA */</script>
+  <script src="gallery.js" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="masthead">
+      <a class="wordmark" href="./">Weward<span>DESIGN STUDIES</span></a>
+      <div class="edition"><span class="edition-dot"></span> 图标探索 / 第一轮</div>
+    </header>
+    <main>
+      <section class="intro">
+        <div>
+          <p class="eyebrow">MESSAGES, MOVING FORWARD.</p>
+          <h1>为消息的流转，<br>找一个好记的形状<span class="title-period">。</span></h1>
+          <p class="intro-copy">20 个图标方案，同一组绿色，不同的表达。<br>点击图标查看实际尺寸和使用效果，再把喜欢的编号告诉我。</p>
+        </div>
+        <div class="intro-aside">
+          <span class="large-count">20</span>
+          <div class="aside-line">独立构思 <span>/</span> 矢量图形</div>
+          <div class="download-links"><a href="overview.svg" target="_blank" rel="noopener">查看总览 ↗</a><a href="weward-20-icons.zip" download>下载全部 ↓</a></div>
+        </div>
+      </section>
+
+      <section class="review" aria-label="图标方案">
+        <div class="toolbar">
+          <div class="filters" aria-label="按设计方向筛选">
+            <button class="filter active" data-filter="all" aria-pressed="true">全部 <span>20</span></button>
+            <button class="filter" data-filter="字母标识" aria-pressed="false">字母标识</button>
+            <button class="filter" data-filter="消息符号" aria-pressed="false">消息符号</button>
+            <button class="filter" data-filter="连接中转" aria-pressed="false">连接中转</button>
+            <button class="filter" data-filter="抽象几何" aria-pressed="false">抽象几何</button>
+            <button class="filter" data-filter="saved" aria-pressed="false">候选 <span id="saved-count">0</span></button>
+          </div>
+          <div class="mode-controls" aria-label="图标颜色">
+            <button data-mode="original" class="active" aria-pressed="true" title="项目原色">原色</button>
+            <button data-mode="mono" aria-pressed="false" title="单色辨识度">单色</button>
+            <button data-mode="reverse" aria-pressed="false" title="深色背景上的反白图标">反白</button>
+          </div>
+        </div>
+        <div class="grid" id="gallery">
+          <!-- CANDIDATES -->
+        </div>
+        <p id="empty-state" class="empty-state" hidden>还没有候选。点击任一图标，在预览中加入候选。</p>
+      </section>
+      <footer class="page-footer"><span>Weward · 群聊采集与中转</span><span id="selection-note" role="status">选好后，回复编号即可，例如「选 01」。</span></footer>
+    </main>
+  </div>
+
+  <dialog id="detail" aria-labelledby="detail-title" aria-describedby="detail-description">
+    <header class="detail-header">
+      <div><span id="detail-number" class="number"></span><h2 id="detail-title"></h2></div>
+      <button id="close-detail" class="close-button" aria-label="关闭预览">×</button>
+    </header>
+    <p id="detail-description"></p>
+    <div class="detail-art">
+      <div class="detail-surface white-surface"><img id="detail-main" width="136" height="136" alt=""><span>项目原色</span></div>
+      <div class="detail-surface soft-surface"><img id="detail-mono" width="136" height="136" alt=""><span>单色</span></div>
+      <div class="detail-surface dark-surface"><img id="detail-reverse" width="136" height="136" alt=""><span>反白</span></div>
+    </div>
+    <div class="usage-grid">
+      <section class="usage-panel browser-preview">
+        <h3>浏览器标签页 <span>16 px</span></h3>
+        <div class="browser-chrome"><span class="window-dots">● ● ●</span><div class="browser-tab"><img class="selected-mark" width="16" height="16" alt="">Weward <span>×</span></div></div>
+        <div class="mock-header"><img class="selected-mark" width="28" height="28" alt=""><b>Weward</b><span>群聊中转</span></div>
+        <div class="mock-nav"><span class="mock-active">消息</span><span>投递任务</span><span>配置</span><span class="mock-nav-note">顶栏 28 px</span></div>
+      </section>
+      <section class="usage-panel app-preview">
+        <h3>桌面快捷方式 <span>64 px</span></h3>
+        <div class="homescreen"><div class="app-tile"><img class="selected-mark" width="64" height="64" alt=""></div><span>Weward</span></div>
+      </section>
+    </div>
+    <div class="actual-sizes">
+      <span>原始尺寸</span>
+      <span><img class="selected-mark" width="16" height="16" alt="">16</span>
+      <span><img class="selected-mark" width="24" height="24" alt="">24</span>
+      <span><img class="selected-mark" width="32" height="32" alt="">32</span>
+      <span><img class="selected-mark" width="48" height="48" alt="">48</span>
+    </div>
+    <footer class="detail-footer">
+      <div class="detail-navigation"><button id="previous" aria-label="上一个方案">←</button><span id="detail-position"></span><button id="next" aria-label="下一个方案">→</button></div>
+      <div class="detail-actions"><a id="download-svg" download>下载 SVG ↓</a><button id="save-candidate" class="primary" aria-pressed="false">加入候选</button></div>
+    </footer>
+    <p class="detail-note">候选保存在当前浏览器中；最终选择请在对话中回复编号。</p>
+  </dialog>
+</body>
+</html>

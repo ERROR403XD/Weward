@@ -1,0 +1,162 @@
+[
+  {
+    "id": "01",
+    "slug": "forward-w",
+    "name": "向前 W",
+    "category": "字母标识",
+    "description": "把 W 的末笔折成向前的箭头，兼顾项目名称与中转方向。",
+    "file": "icons/01-forward-w.svg"
+  },
+  {
+    "id": "02",
+    "slug": "conversation-w",
+    "name": "会话 W",
+    "category": "消息符号",
+    "description": "对话框底部化为 W 的两道折角，让字母融入消息轮廓。",
+    "file": "icons/02-conversation-w.svg"
+  },
+  {
+    "id": "03",
+    "slug": "relay-link",
+    "name": "接力环",
+    "category": "连接中转",
+    "description": "两段开口链环相接，表达消息在两个端点之间可靠流转。",
+    "file": "icons/03-relay-link.svg"
+  },
+  {
+    "id": "04",
+    "slug": "message-gate",
+    "name": "消息出口",
+    "category": "消息符号",
+    "description": "对话框向右敞开，箭头从内部延伸，直接表达消息中转。",
+    "file": "icons/04-message-gate.svg"
+  },
+  {
+    "id": "05",
+    "slug": "confluence",
+    "name": "汇流",
+    "category": "连接中转",
+    "description": "三路输入收束为一个出口，对应多群采集与统一投递。",
+    "file": "icons/05-confluence.svg"
+  },
+  {
+    "id": "06",
+    "slug": "relay-bridge",
+    "name": "消息桥",
+    "category": "连接中转",
+    "description": "桥拱连接两端，稳重、简洁，强调持续运行的中转服务。",
+    "file": "icons/06-relay-bridge.svg"
+  },
+  {
+    "id": "07",
+    "slug": "folded-packet",
+    "name": "折页 W",
+    "category": "字母标识",
+    "description": "四块折面组成紧凑的 W，也像一组被整理好的消息页。",
+    "file": "icons/07-folded-packet.svg"
+  },
+  {
+    "id": "08",
+    "slug": "message-tray",
+    "name": "收信槽",
+    "category": "消息符号",
+    "description": "消息落入开放的收集槽，突出接收与持久保存。",
+    "file": "icons/08-message-tray.svg"
+  },
+  {
+    "id": "09",
+    "slug": "relay-ring",
+    "name": "环形接力",
+    "category": "连接中转",
+    "description": "开放圆环围绕消息块，表达消息被接住后继续向前。",
+    "file": "icons/09-relay-ring.svg"
+  },
+  {
+    "id": "10",
+    "slug": "w-cutout",
+    "name": "负形 W",
+    "category": "字母标识",
+    "description": "以大块留白刻出 W，轮廓紧凑，适合标签页与应用图标。",
+    "file": "icons/10-w-cutout.svg"
+  },
+  {
+    "id": "11",
+    "slug": "relay-tiles",
+    "name": "递进",
+    "category": "抽象几何",
+    "description": "三枚错位方块朝同一方向推进，像依次处理的消息队列。",
+    "file": "icons/11-relay-tiles.svg"
+  },
+  {
+    "id": "12",
+    "slug": "chat-bookmark",
+    "name": "会话书签",
+    "category": "消息符号",
+    "description": "将聊天气泡与书签合并，强调消息的留存和回看。",
+    "file": "icons/12-chat-bookmark.svg"
+  },
+  {
+    "id": "13",
+    "slug": "w-route",
+    "name": "W 轨迹",
+    "category": "字母标识",
+    "description": "一条连续的粗线走成 W，表达不中断的消息传递。",
+    "file": "icons/13-w-route.svg"
+  },
+  {
+    "id": "14",
+    "slug": "open-parcel",
+    "name": "消息包",
+    "category": "抽象几何",
+    "description": "打开的包裹由三块平面构成，对应整理后投递的文件包。",
+    "file": "icons/14-open-parcel.svg"
+  },
+  {
+    "id": "15",
+    "slug": "conversation-weave",
+    "name": "交织",
+    "category": "抽象几何",
+    "description": "两条宽带交织成方形结，表达多来源消息的连接与组织。",
+    "file": "icons/15-conversation-weave.svg"
+  },
+  {
+    "id": "16",
+    "slug": "relay-wing",
+    "name": "信翼",
+    "category": "抽象几何",
+    "description": "两片折面组成向前的轻盈轮廓，像被送出的信件。",
+    "file": "icons/16-relay-wing.svg"
+  },
+  {
+    "id": "17",
+    "slug": "connected-rooms",
+    "name": "相连的群",
+    "category": "消息符号",
+    "description": "两个圆角空间由短桥连接，让群聊与中转关系一目了然。",
+    "file": "icons/17-connected-rooms.svg"
+  },
+  {
+    "id": "18",
+    "slug": "message-stack",
+    "name": "消息叠栈",
+    "category": "消息符号",
+    "description": "层叠卡片中的负形箭头，兼顾保存与向外投递。",
+    "file": "icons/18-message-stack.svg"
+  },
+  {
+    "id": "19",
+    "slug": "relay-pivot",
+    "name": "中转枢纽",
+    "category": "连接中转",
+    "description": "多条路径围绕中心折转，以一个明确出口结束。",
+    "file": "icons/19-relay-pivot.svg"
+  },
+  {
+    "id": "20",
+    "slug": "window-w",
+    "name": "W 窗口",
+    "category": "字母标识",
+    "description": "圆角窗口内嵌 W，让品牌字母与 WebUI 的窗口形态相呼应。",
+    "file": "icons/20-window-w.svg"
+  }
+]
